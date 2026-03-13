@@ -1,0 +1,63 @@
+# Platform Configuration ConfigMap
+#
+# The 'deploy' command auto-creates this ConfigMap with detected platform defaults.
+# You only need this file if you want to customize settings before deploy.
+#
+# Usage:
+#   # Pre-create with customizations, then deploy (won't overwrite)
+#   kubectl apply -f examples/configmap.yaml
+#   rhaii-validate-agent deploy --image <img>
+#
+#   # Or edit after deploy auto-creates it
+#   kubectl edit configmap rhaii-validate-config -n rhaii-validation
+#
+# Only specify fields you want to change — the agent merges with embedded defaults.
+# Platform defaults are embedded in the binary from pkg/config/platforms/.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rhaii-validate-config
+  namespace: rhaii-validation
+  labels:
+    app: rhaii-validate-agent
+data:
+  # This is an example override — customize as needed for your environment.
+  # The 'deploy' command auto-populates this with detected platform defaults.
+  platform.yaml: |
+    # Platform is auto-detected. Override only if detection is wrong.
+    # platform: AKS
+
+    gpu:
+      # Add or remove GPU types as needed
+      # supported_types: ["H100", "H200", "A100", "B200", "MI300X"]
+
+      # Override minimum driver version
+      # min_driver_version: "550.0"
+
+      # Override nvidia-smi path if non-standard
+      # nvidia_smi_path: "/usr/local/bin/nvidia-smi"
+
+    rdma:
+      # Override NIC prefix for non-standard RDMA setups
+      # nic_prefix: "mlx5_"
+      # expected_devices_per_gpu: 1
+
+    thresholds:
+      # Customize pass/warn/fail thresholds
+      tcp_bandwidth_gbps:
+        pass: 25
+        warn: 10
+        fail: 5
+      rdma_bandwidth_pd_gbps:
+        pass: 180
+        warn: 100
+        fail: 50
+      rdma_bandwidth_wep_gbps:
+        pass: 350
+        warn: 200
+        fail: 100
+      tcp_latency_ms:
+        pass: 1
+        warn: 5
+        fail: 10

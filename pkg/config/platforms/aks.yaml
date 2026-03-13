@@ -1,0 +1,33 @@
+platform: AKS
+
+gpu:
+  supported_types: ["H100", "H200", "A100", "B200", "MI300X"]
+  device_plugin: "nvidia-device-plugin"
+  taint_key: "sku"
+  taint_value: "gpu"
+  min_driver_version: "535.0"
+  nvidia_smi_path: "/usr/bin/nvidia-smi"
+  nvidia_lib_path: "/usr/lib/x86_64-linux-gnu"
+
+rdma:
+  device_plugin: "rdma-shared-device-plugin"
+  nic_prefix: "mlx5_"
+  expected_devices_per_gpu: 1
+
+thresholds:
+  tcp_bandwidth_gbps:
+    pass: 25
+    warn: 10
+    fail: 5
+  rdma_bandwidth_pd_gbps:
+    pass: 180
+    warn: 100
+    fail: 50
+  rdma_bandwidth_wep_gbps:
+    pass: 350
+    warn: 200
+    fail: 100
+  tcp_latency_ms:
+    pass: 1
+    warn: 5
+    fail: 10
