@@ -1,0 +1,93 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-local:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        run: make build
+
+      - name: Verify version flag
+        run: ./bin/rhaii-validate-agent --version
+
+      - name: Run agent locally (expect check failures, no runtime errors)
+        run: |
+          # Run with --no-wait so it exits immediately.
+          # Checks will FAIL (no GPU/RDMA on CI runner) — that's expected.
+          # What we're testing: no panics, no build errors, clean JSON output.
+          set +e
+          ./bin/rhaii-validate-agent run --no-wait --node-name ci-runner 2>stderr.log >stdout.log
+          exit_code=$?
+          set -e
+
+          echo "=== stderr ==="
+          cat stderr.log
+
+          echo "=== stdout ==="
+          cat stdout.log
+
+          # Exit code 1 is expected (checks report FAIL)
+          if [ "$exit_code" -ne 1 ]; then
+            echo "ERROR: expected exit code 1 (check failures), got $exit_code"
+            exit 1
+          fi
+
+          # Verify stdout is valid JSON
+          if ! python3 -m json.tool stdout.log > /dev/null 2>&1; then
+            echo "ERROR: stdout is not valid JSON"
+            exit 1
+          fi
+
+          # Verify JSON has expected structure
+          python3 -c "
+          import json, sys
+          report = json.load(open('stdout.log'))
+          assert 'node' in report, 'missing node field'
+          assert 'results' in report, 'missing results field'
+          assert len(report['results']) > 0, 'no results'
+          for r in report['results']:
+              assert r['status'] in ('PASS', 'FAIL', 'WARN', 'SKIP'), f'invalid status: {r[\"status\"]}'
+          print(f'OK: {len(report[\"results\"])} check(s), all statuses valid')
+          "
+
+      - name: Build container image
+        run: docker build -t rhaii-validate-agent:ci .
+
+      - name: Run container e2e (expect check failures, no runtime errors)
+        run: |
+          set +e
+          docker run --rm rhaii-validate-agent:ci run --no-wait --node-name ci-container 2>stderr.log >stdout.log
+          exit_code=$?
+          set -e
+
+          echo "=== container stderr ==="
+          cat stderr.log
+
+          echo "=== container stdout ==="
+          cat stdout.log
+
+          if [ "$exit_code" -ne 1 ]; then
+            echo "ERROR: expected exit code 1, got $exit_code"
+            exit 1
+          fi
+
+          if ! python3 -m json.tool stdout.log > /dev/null 2>&1; then
+            echo "ERROR: container stdout is not valid JSON"
+            exit 1
+          fi
+
+          echo "Container e2e passed (checks failed as expected, no runtime errors)"
