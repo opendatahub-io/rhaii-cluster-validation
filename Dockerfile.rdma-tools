@@ -1,5 +1,5 @@
 # Base images for builder and runtime stages
-#  tested:
+# tested:
 #   nvcr.io/nvidia/cuda:13.0.0-devel-ubi9 / nvcr.io/nvidia/cuda:13.0.0-runtime-ubi9
 #   quay.io/aipcc/base-images/cuda-13.0-el9.6:3.4 (includes CUDA devel + runtime)
 ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.0.0-devel-ubi9
