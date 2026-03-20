@@ -1,4 +1,4 @@
-.PHONY: build test container push deploy deploy-all install uninstall logs clean clean-all help
+.PHONY: build test container container-rdma container-rdma-dev push push-rdma push-rdma-dev deploy deploy-all install uninstall logs clean clean-all help
 
 IMG ?= quay.io/opendatahub/rhaii-validator:latest
 export IMG
@@ -28,6 +28,8 @@ help:
 	@echo "  make build          - Build agent binary"
 	@echo "  make test           - Run unit tests"
 	@echo "  make container      - Build container image (linux/amd64)"
+	@echo "  make container-rdma - Build RDMA tools image (aipcc base)"
+	@echo "  make container-rdma-dev - Build RDMA tools dev image (nvcr.io base)"
 	@echo "  make push           - Push container image"
 	@echo "  make install        - Install as kubectl plugin (kubectl rhaii-validate)"
 	@echo "  make uninstall      - Remove kubectl plugin"
@@ -60,8 +62,9 @@ test:
 	go test ./... -v
 
 IMG_TOOLS ?= quay.io/opendatahub/rhaii-rdma-tools:latest
-RDMA_BUILDER_IMAGE ?= nvcr.io/nvidia/cuda:13.0.0-devel-ubi9
-RDMA_RUNTIME_IMAGE ?= nvcr.io/nvidia/cuda:13.0.0-runtime-ubi9
+IMG_TOOLS_DEV ?= quay.io/opendatahub/rhaii-rdma-tools-dev:latest
+RDMA_BUILDER_IMAGE ?= quay.io/aipcc/base-images/cuda-13.0-el9.6:3.4
+RDMA_RUNTIME_IMAGE ?= quay.io/aipcc/base-images/cuda-13.0-el9.6:3.4
 
 container:
 	$(CONTAINER_RUNTIME) build --platform $(TARGET_PLATFORM) --build-arg VERSION=$(VERSION) -t $(IMG) .
@@ -72,11 +75,20 @@ container-rdma:
 		--build-arg RUNTIME_IMAGE=$(RDMA_RUNTIME_IMAGE) \
 		-t $(IMG_TOOLS) .
 
+container-rdma-dev:
+	$(CONTAINER_RUNTIME) build -f Dockerfile.rdma-tools \
+		--build-arg BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.0.0-devel-ubi9 \
+		--build-arg RUNTIME_IMAGE=nvcr.io/nvidia/cuda:13.0.0-runtime-ubi9 \
+		-t $(IMG_TOOLS_DEV) .
+
 push:
 	$(CONTAINER_RUNTIME) push $(IMG)
 
 push-rdma:
 	$(CONTAINER_RUNTIME) push $(IMG_TOOLS)
+
+push-rdma-dev:
+	$(CONTAINER_RUNTIME) push $(IMG_TOOLS_DEV)
 
 deploy: install
 	kubectl rhaii-validate all

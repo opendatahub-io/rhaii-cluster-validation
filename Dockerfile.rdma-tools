@@ -2,8 +2,8 @@
 #  tested:
 #   nvcr.io/nvidia/cuda:13.0.0-devel-ubi9 / nvcr.io/nvidia/cuda:13.0.0-runtime-ubi9
 #   quay.io/aipcc/base-images/cuda-13.0-el9.6:3.4 (includes CUDA devel + runtime)
-ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.0.0-devel-ubi9
-ARG RUNTIME_IMAGE=nvcr.io/nvidia/cuda:13.0.0-runtime-ubi9
+ARG BUILDER_IMAGE=quay.io/aipcc/base-images/cuda-13.0-el9.6:3.4
+ARG RUNTIME_IMAGE=quay.io/aipcc/base-images/cuda-13.0-el9.6:3.4
 
 # Tool versions (pinned for reproducibility)
 ARG PERFTEST_VERSION=25.10.0-0.128
