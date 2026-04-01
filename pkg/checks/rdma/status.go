@@ -171,37 +171,39 @@ type NICStatusInfo struct {
 	LinkLayer string `json:"link_layer"`
 }
 
+var (
+	ibstatNameRe  = regexp.MustCompile(`CA '([^']+)'`)
+	ibstatPortRe  = regexp.MustCompile(`Port (\d+):`)
+	ibstatStateRe = regexp.MustCompile(`State:\s+(\S+)`)
+	ibstatRateRe  = regexp.MustCompile(`Rate:\s+(\S+)`)
+	ibstatLLRe    = regexp.MustCompile(`Link layer:\s+(\S+)`)
+)
+
 func parseIBStat(output string) []NICStatusInfo {
 	var nics []NICStatusInfo
-
-	nameRe := regexp.MustCompile(`CA '([^']+)'`)
-	portRe := regexp.MustCompile(`Port (\d+):`)
-	stateRe := regexp.MustCompile(`State:\s+(\S+)`)
-	rateRe := regexp.MustCompile(`Rate:\s+(\S+)`)
-	llRe := regexp.MustCompile(`Link layer:\s+(\S+)`)
 
 	sections := strings.Split(output, "CA '")
 	for _, section := range sections[1:] {
 		caName := ""
-		if m := nameRe.FindStringSubmatch("CA '" + section); len(m) > 1 {
+		if m := ibstatNameRe.FindStringSubmatch("CA '" + section); len(m) > 1 {
 			caName = m[1]
 		}
 		if caName == "" {
 			continue
 		}
 
-		portSections := portRe.Split(section, -1)
-		portNumbers := portRe.FindAllStringSubmatch(section, -1)
+		portSections := ibstatPortRe.Split(section, -1)
+		portNumbers := ibstatPortRe.FindAllStringSubmatch(section, -1)
 
 		if len(portSections) <= 1 {
 			nic := NICStatusInfo{Name: caName}
-			if m := stateRe.FindStringSubmatch(section); len(m) > 1 {
+			if m := ibstatStateRe.FindStringSubmatch(section); len(m) > 1 {
 				nic.State = m[1]
 			}
-			if m := rateRe.FindStringSubmatch(section); len(m) > 1 {
+			if m := ibstatRateRe.FindStringSubmatch(section); len(m) > 1 {
 				nic.Rate = m[1]
 			}
-			if m := llRe.FindStringSubmatch(section); len(m) > 1 {
+			if m := ibstatLLRe.FindStringSubmatch(section); len(m) > 1 {
 				nic.LinkLayer = m[1]
 			}
 			nics = append(nics, nic)
@@ -215,13 +217,13 @@ func parseIBStat(output string) []NICStatusInfo {
 			}
 
 			nic := NICStatusInfo{Name: fmt.Sprintf("%s/port%s", caName, portNum)}
-			if m := stateRe.FindStringSubmatch(portSection); len(m) > 1 {
+			if m := ibstatStateRe.FindStringSubmatch(portSection); len(m) > 1 {
 				nic.State = m[1]
 			}
-			if m := rateRe.FindStringSubmatch(portSection); len(m) > 1 {
+			if m := ibstatRateRe.FindStringSubmatch(portSection); len(m) > 1 {
 				nic.Rate = m[1]
 			}
-			if m := llRe.FindStringSubmatch(portSection); len(m) > 1 {
+			if m := ibstatLLRe.FindStringSubmatch(portSection); len(m) > 1 {
 				nic.LinkLayer = m[1]
 			}
 			nics = append(nics, nic)

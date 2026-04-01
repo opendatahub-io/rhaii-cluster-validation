@@ -138,20 +138,20 @@ func (c *Controller) RunDeps(ctx context.Context) error {
 	return nil
 }
 
-// storeReport saves the JSON report to a ConfigMap so it persists after cleanup.
-func (c *Controller) storeReport(ctx context.Context, reports []checks.NodeReport, jobResults []jobrunner.JobResult) error {
-	type jsonReport struct {
-		Platform      string               `json:"platform"`
-		Timestamp     string               `json:"timestamp"`
-		ClusterChecks []checks.Result      `json:"cluster_checks,omitempty"`
-		Nodes         []checks.NodeReport  `json:"nodes"`
-		JobResults    []jobrunner.JobResult `json:"job_results,omitempty"`
-		Summary       map[string]int       `json:"summary"`
-		Status        string               `json:"status"`
-	}
+// jsonReport is the report structure used for both ConfigMap storage and JSON output.
+type jsonReport struct {
+	Platform      string               `json:"platform"`
+	Timestamp     string               `json:"timestamp,omitempty"`
+	ClusterChecks []checks.Result      `json:"cluster_checks,omitempty"`
+	Nodes         []checks.NodeReport  `json:"nodes"`
+	JobResults    []jobrunner.JobResult `json:"job_results,omitempty"`
+	Summary       map[string]int       `json:"summary"`
+	Status        string               `json:"status"`
+}
 
-	pass, warn, fail, skip := 0, 0, 0, 0
-	for _, r := range c.clusterResults {
+// countStatuses tallies pass/warn/fail/skip across all result sources.
+func countStatuses(clusterResults []checks.Result, reports []checks.NodeReport, jobResults []jobrunner.JobResult) (pass, warn, fail, skip int) {
+	for _, r := range clusterResults {
 		switch r.Status {
 		case checks.StatusPass:
 			pass++
@@ -187,13 +187,23 @@ func (c *Controller) storeReport(ctx context.Context, reports []checks.NodeRepor
 			fail++
 		}
 	}
+	return
+}
 
-	status := "READY"
+// readinessStatus returns the cluster readiness string based on fail/warn counts.
+func readinessStatus(fail, warn int) string {
 	if fail > 0 {
-		status = "NOT READY"
-	} else if warn > 0 {
-		status = "READY (with warnings)"
+		return "NOT READY"
 	}
+	if warn > 0 {
+		return "READY (with warnings)"
+	}
+	return "READY"
+}
+
+// storeReport saves the JSON report to a ConfigMap so it persists after cleanup.
+func (c *Controller) storeReport(ctx context.Context, reports []checks.NodeReport, jobResults []jobrunner.JobResult) error {
+	pass, warn, fail, skip := countStatuses(c.clusterResults, reports, jobResults)
 
 	r := jsonReport{
 		Platform:      string(c.platform),
@@ -202,7 +212,7 @@ func (c *Controller) storeReport(ctx context.Context, reports []checks.NodeRepor
 		Nodes:         reports,
 		JobResults:    jobResults,
 		Summary:       map[string]int{"pass": pass, "warn": warn, "fail": fail, "skip": skip},
-		Status:        status,
+		Status:        readinessStatus(fail, warn),
 	}
 
 	data, err := json.MarshalIndent(r, "", "  ")
@@ -1514,6 +1524,7 @@ func (c *Controller) configureJobs(ctx context.Context, gpuNodes []string) {
 	}
 
 	for _, job := range c.jobs {
+		// Pod config: TCP jobs get only cpu/memory, RDMA jobs get everything
 		if configurable, ok := job.(jobrunner.Configurable); ok {
 			if strings.HasPrefix(job.Name(), "ib-") {
 				configurable.SetPodConfig(rdmaCfg)
@@ -1521,10 +1532,8 @@ func (c *Controller) configureJobs(ctx context.Context, gpuNodes []string) {
 				configurable.SetPodConfig(tcpCfg)
 			}
 		}
-	}
 
-	// Thresholds from platform config
-	for _, job := range c.jobs {
+		// Thresholds from platform config
 		if tc, ok := job.(jobrunner.ThresholdConfigurable); ok {
 			switch job.Name() {
 			case "iperf3-tcp":
@@ -1535,10 +1544,8 @@ func (c *Controller) configureJobs(ctx context.Context, gpuNodes []string) {
 				tc.SetThreshold(c.cfg.Thresholds.RDMABandwidthPD.Pass, c.cfg.Thresholds.RDMABandwidthPD.Warn)
 			}
 		}
-	}
 
-	// Container images from image config
-	for _, job := range c.jobs {
+		// Container images from image config
 		if imgConfig, ok := job.(jobrunner.ImageConfigurable); ok {
 			var jobImage string
 
@@ -1728,8 +1735,6 @@ func (c *Controller) printReport(reports []checks.NodeReport, jobResults []jobru
 
 	fmt.Fprintln(c.output)
 
-	pass, warn, fail, skip := 0, 0, 0, 0
-
 	fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s %s\n", "GROUP", "CHECK", "NODE", "STATUS", "MESSAGE")
 	fmt.Fprintln(c.output, strings.Repeat("-", 130))
 
@@ -1740,17 +1745,6 @@ func (c *Controller) printReport(reports []checks.NodeReport, jobResults []jobru
 		if r.Remediation != "" {
 			fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s Fix: %s\n",
 				"", "", "", "", r.Remediation)
-		}
-
-		switch r.Status {
-		case checks.StatusPass:
-			pass++
-		case checks.StatusWarn:
-			warn++
-		case checks.StatusFail:
-			fail++
-		case checks.StatusSkip:
-			skip++
 		}
 	}
 
@@ -1767,17 +1761,6 @@ func (c *Controller) printReport(reports []checks.NodeReport, jobResults []jobru
 				fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s Fix: %s\n",
 					"", "", "", "", r.Remediation)
 			}
-
-			switch r.Status {
-			case checks.StatusPass:
-				pass++
-			case checks.StatusWarn:
-				warn++
-			case checks.StatusFail:
-				fail++
-			case checks.StatusSkip:
-				skip++
-			}
 		}
 	}
 
@@ -1789,26 +1772,17 @@ func (c *Controller) printReport(reports []checks.NodeReport, jobResults []jobru
 		}
 		fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s %s\n",
 			"bandwidth", jr.JobName, node, jr.Status, jr.Message)
-
-		switch jr.Status {
-		case checks.StatusPass:
-			pass++
-		case checks.StatusWarn:
-			warn++
-		case checks.StatusFail:
-			fail++
-		}
 	}
+
+	pass, warn, fail, skip := countStatuses(c.clusterResults, reports, jobResults)
 
 	fmt.Fprintln(c.output)
 	fmt.Fprintf(c.output, "Summary: %d PASS | %d WARN | %d FAIL | %d SKIP\n", pass, warn, fail, skip)
 
 	if fail > 0 {
 		fmt.Fprintln(c.output, "Status:  NOT READY - resolve FAIL items before deploying")
-	} else if warn > 0 {
-		fmt.Fprintln(c.output, "Status:  READY (with warnings)")
 	} else {
-		fmt.Fprintln(c.output, "Status:  READY")
+		fmt.Fprintf(c.output, "Status:  %s\n", readinessStatus(fail, warn))
 	}
 
 	if c.reportStored {
@@ -1822,59 +1796,7 @@ func (c *Controller) printReport(reports []checks.NodeReport, jobResults []jobru
 }
 
 func (c *Controller) printJSONReport(reports []checks.NodeReport, jobResults []jobrunner.JobResult) bool {
-	type jsonReport struct {
-		Platform      string                `json:"platform"`
-		ClusterChecks []checks.Result       `json:"cluster_checks,omitempty"`
-		Nodes         []checks.NodeReport   `json:"nodes"`
-		JobResults    []jobrunner.JobResult  `json:"job_results,omitempty"`
-		Summary       map[string]int        `json:"summary"`
-		Status        string                `json:"status"`
-	}
-
-	pass, warn, fail, skip := 0, 0, 0, 0
-	for _, r := range c.clusterResults {
-		switch r.Status {
-		case checks.StatusPass:
-			pass++
-		case checks.StatusWarn:
-			warn++
-		case checks.StatusFail:
-			fail++
-		case checks.StatusSkip:
-			skip++
-		}
-	}
-	for _, report := range reports {
-		for _, r := range report.Results {
-			switch r.Status {
-			case checks.StatusPass:
-				pass++
-			case checks.StatusWarn:
-				warn++
-			case checks.StatusFail:
-				fail++
-			case checks.StatusSkip:
-				skip++
-			}
-		}
-	}
-	for _, jr := range jobResults {
-		switch jr.Status {
-		case checks.StatusPass:
-			pass++
-		case checks.StatusWarn:
-			warn++
-		case checks.StatusFail:
-			fail++
-		}
-	}
-
-	status := "READY"
-	if fail > 0 {
-		status = "NOT READY"
-	} else if warn > 0 {
-		status = "READY (with warnings)"
-	}
+	pass, warn, fail, skip := countStatuses(c.clusterResults, reports, jobResults)
 
 	r := jsonReport{
 		Platform:      string(c.platform),
@@ -1882,7 +1804,7 @@ func (c *Controller) printJSONReport(reports []checks.NodeReport, jobResults []j
 		Nodes:         reports,
 		JobResults:    jobResults,
 		Summary:       map[string]int{"pass": pass, "warn": warn, "fail": fail, "skip": skip},
-		Status:        status,
+		Status:        readinessStatus(fail, warn),
 	}
 
 	data, _ := json.MarshalIndent(r, "", "  ")
