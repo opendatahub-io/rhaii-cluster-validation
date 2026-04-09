@@ -1,4 +1,4 @@
-ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.0.0-devel-ubi9
+ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.2.0-devel-ubi9
 ARG RUNTIME_IMAGE=registry.access.redhat.com/ubi9/ubi:latest
 
 # Perftest release tarball (pre-generated configure, no autotools needed)
