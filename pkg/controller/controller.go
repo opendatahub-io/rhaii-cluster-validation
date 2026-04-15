@@ -129,7 +129,7 @@ func (c *Controller) RunDeps(ctx context.Context) error {
 	fmt.Fprintln(log, "[CRD Checks] Checking required CRDs...")
 	c.clusterResults = c.RunCRDChecks(ctx)
 	for _, r := range c.clusterResults {
-		fmt.Fprintf(log, "  [%s] %s: %s\n", r.Status, r.Name, r.Message)
+		fmt.Fprintf(log, "  [%s] %s: %s\n", colorStatus(r.Status), r.Name, r.Message)
 	}
 	fmt.Fprintln(log)
 
@@ -137,7 +137,7 @@ func (c *Controller) RunDeps(ctx context.Context) error {
 	operatorResults := c.RunOperatorChecks(ctx)
 	c.clusterResults = append(c.clusterResults, operatorResults...)
 	for _, r := range operatorResults {
-		fmt.Fprintf(log, "  [%s] %s: %s\n", r.Status, r.Name, r.Message)
+		fmt.Fprintf(log, "  [%s] %s: %s\n", colorStatus(r.Status), r.Name, r.Message)
 	}
 	fmt.Fprintln(log)
 
@@ -152,84 +152,6 @@ func (c *Controller) RunDeps(ctx context.Context) error {
 		return fmt.Errorf("dependency check failed: one or more checks reported FAIL")
 	}
 	return nil
-}
-
-// jsonReport is the report structure used for both ConfigMap storage and JSON output.
-type jsonReport struct {
-	Platform      string                `json:"platform"`
-	Timestamp     string                `json:"timestamp,omitempty"`
-	ClusterChecks []checks.Result       `json:"cluster_checks,omitempty"`
-	Nodes         []checks.NodeReport   `json:"nodes"`
-	JobResults    []jobrunner.JobResult  `json:"job_results,omitempty"`
-	Pingmesh      *rdma.PingMeshReport  `json:"pingmesh,omitempty"`
-	Summary       map[string]int        `json:"summary"`
-	Status        string                `json:"status"`
-}
-
-// countStatuses tallies pass/warn/fail/skip across all result sources.
-func countStatuses(clusterResults []checks.Result, reports []checks.NodeReport, jobResults []jobrunner.JobResult, pingmesh *rdma.PingMeshReport) (pass, warn, fail, skip int) {
-	for _, r := range clusterResults {
-		switch r.Status {
-		case checks.StatusPass:
-			pass++
-		case checks.StatusWarn:
-			warn++
-		case checks.StatusFail:
-			fail++
-		case checks.StatusSkip:
-			skip++
-		}
-	}
-	for _, report := range reports {
-		for _, r := range report.Results {
-			switch r.Status {
-			case checks.StatusPass:
-				pass++
-			case checks.StatusWarn:
-				warn++
-			case checks.StatusFail:
-				fail++
-			case checks.StatusSkip:
-				skip++
-			}
-		}
-	}
-	if pingmesh != nil {
-		for _, s := range pingmesh.Summary {
-			switch s.Status {
-			case checks.StatusPass:
-				pass++
-			case checks.StatusWarn:
-				warn++
-			case checks.StatusFail:
-				fail++
-			case checks.StatusSkip:
-				skip++
-			}
-		}
-	}
-	for _, jr := range jobResults {
-		switch jr.Status {
-		case checks.StatusPass:
-			pass++
-		case checks.StatusWarn:
-			warn++
-		case checks.StatusFail:
-			fail++
-		}
-	}
-	return
-}
-
-// readinessStatus returns the cluster readiness string based on fail/warn counts.
-func readinessStatus(fail, warn int) string {
-	if fail > 0 {
-		return "NOT READY"
-	}
-	if warn > 0 {
-		return "READY (with warnings)"
-	}
-	return "READY"
 }
 
 // storeReport saves the JSON report to a ConfigMap so it persists after cleanup.
@@ -304,61 +226,6 @@ func (c *Controller) storeReport(ctx context.Context, reports []checks.NodeRepor
 	c.reportStored = true
 	fmt.Fprintf(c.output, "  Report stored in ConfigMap %s/%s\n", c.opts.Namespace, reportCMName)
 	return nil
-}
-
-// printDebugHelp lists actual pod/job names and useful debug commands.
-func (c *Controller) printDebugHelp(ctx context.Context) {
-	ns := c.opts.Namespace
-
-	fmt.Fprintln(c.output, "")
-	fmt.Fprintln(c.output, "=== DEBUG MODE ===")
-	fmt.Fprintln(c.output, "Jobs kept alive for debugging.")
-	fmt.Fprintln(c.output, "")
-
-	// List all validation jobs (GPU check + net check + bandwidth)
-	for _, selector := range []string{
-		checkJobLabelKey + "=" + gpuCheckJobLabelValue,
-		checkJobLabelKey + "=" + netCheckJobLabelValue,
-		"app=rhaii-validate-job",
-	} {
-		jobs, err := c.client.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{
-			LabelSelector: selector,
-		})
-		if err != nil || len(jobs.Items) == 0 {
-			continue
-		}
-		fmt.Fprintf(c.output, "Jobs (%s):\n", selector)
-		for _, j := range jobs.Items {
-			fmt.Fprintf(c.output, "  kubectl logs -n %s -l job-name=%s\n", ns, j.Name)
-		}
-		fmt.Fprintln(c.output)
-	}
-
-	// List pods from check jobs (GPU + RDMA node)
-	allCheckSelector := checkJobLabelKey + " in (" + gpuCheckJobLabelValue + "," + netCheckJobLabelValue + ")"
-	pods, err := c.client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-		LabelSelector: allCheckSelector,
-	})
-	if err == nil && len(pods.Items) > 0 {
-		fmt.Fprintln(c.output, "Check pods:")
-		for _, pod := range pods.Items {
-			fmt.Fprintf(c.output, "  %s (node: %s, status: %s)\n", pod.Name, pod.Spec.NodeName, pod.Status.Phase)
-		}
-		fmt.Fprintln(c.output, "")
-		fmt.Fprintln(c.output, "Exec into pod:")
-		for _, pod := range pods.Items {
-			fmt.Fprintf(c.output, "  kubectl exec -it -n %s %s -- bash\n", ns, pod.Name)
-		}
-	}
-
-	fmt.Fprintln(c.output, "")
-	fmt.Fprintln(c.output, "Debug commands inside check pod:")
-	fmt.Fprintln(c.output, "  nvidia-smi")
-	fmt.Fprintln(c.output, "  chroot /host ibv_devices")
-	fmt.Fprintln(c.output, "  chroot /host ibstat")
-	fmt.Fprintln(c.output, "  ls /dev/nvidia*")
-	fmt.Fprintln(c.output, "")
-	fmt.Fprintf(c.output, "Cleanup: kubectl rhaii-validate clean\n")
 }
 
 // Cleanup removes all validation resources from the cluster.
@@ -474,14 +341,14 @@ func (c *Controller) Run(ctx context.Context) error {
 		fmt.Fprintln(c.output, "[Step 5] Checking required CRDs...")
 		c.clusterResults = c.RunCRDChecks(ctx)
 		for _, r := range c.clusterResults {
-			fmt.Fprintf(c.output, "  [%s] %s: %s\n", r.Status, r.Name, r.Message)
+			fmt.Fprintf(c.output, "  [%s] %s: %s\n", colorStatus(r.Status), r.Name, r.Message)
 		}
 
 		fmt.Fprintln(c.output, "[Step 5b] Checking operator health...")
 		operatorResults := c.RunOperatorChecks(ctx)
 		c.clusterResults = append(c.clusterResults, operatorResults...)
 		for _, r := range operatorResults {
-			fmt.Fprintf(c.output, "  [%s] %s: %s\n", r.Status, r.Name, r.Message)
+			fmt.Fprintf(c.output, "  [%s] %s: %s\n", colorStatus(r.Status), r.Name, r.Message)
 		}
 	}
 
@@ -2146,115 +2013,3 @@ func (c *Controller) cleanupAll(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) printReport(reports []checks.NodeReport, jobResults []jobrunner.JobResult) bool {
-	fmt.Fprintln(c.output)
-	fmt.Fprintln(c.output, "=== Validation Report ===")
-	fmt.Fprintf(c.output, "Platform: %s\n", c.platform)
-
-	// Print topology if available
-	hasTopology := false
-	for _, report := range reports {
-		if topo := checks.ExtractTopology(report); topo != nil && len(topo.Pairs) > 0 {
-			if !hasTopology {
-				fmt.Fprintln(c.output)
-				fmt.Fprintln(c.output, "GPU-NIC Topology:")
-				hasTopology = true
-			}
-			var pairDescs []string
-			for _, p := range topo.Pairs {
-				pairDescs = append(pairDescs, fmt.Sprintf("GPU%d↔%s(NUMA:%d↔%d)", p.GPU.ID, p.NIC.Dev, p.GPU.NUMA, p.NIC.NUMA))
-			}
-			fmt.Fprintf(c.output, "  %s: %s\n", report.Node, strings.Join(pairDescs, ", "))
-		}
-	}
-
-	fmt.Fprintln(c.output)
-
-	fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s %s\n", "GROUP", "CHECK", "NODE", "STATUS", "MESSAGE")
-	fmt.Fprintln(c.output, strings.Repeat("-", 130))
-
-	for _, r := range c.clusterResults {
-		fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s %s\n",
-			r.Category, r.Name, "(cluster)", r.Status, r.Message)
-
-		if r.Remediation != "" {
-			fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s Fix: %s\n",
-				"", "", "", "", r.Remediation)
-		}
-	}
-
-	for _, report := range reports {
-		for _, r := range report.Results {
-			node := r.Node
-			if node == "" {
-				node = "-"
-			}
-			fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s %s\n",
-				r.Category, r.Name, node, r.Status, r.Message)
-
-			if r.Remediation != "" {
-				fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s Fix: %s\n",
-					"", "", "", "", r.Remediation)
-			}
-		}
-	}
-
-	// Print pingmesh connectivity results (between per-node checks and bandwidth)
-	if c.pingmeshReport != nil {
-		for _, name := range []string{"rdma_conn_rail", "rdma_conn_xrail"} {
-			if s, ok := c.pingmeshReport.Summary[name]; ok {
-				fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s %s\n",
-					"networking_rdma", name, "(cluster)", s.Status, s.Message)
-			}
-		}
-	}
-
-	// Print job results (bandwidth tests)
-	for _, jr := range jobResults {
-		node := jr.Node
-		if node == "" {
-			node = "-"
-		}
-		fmt.Fprintf(c.output, "%-20s %-30s %-35s %-8s %s\n",
-			"bandwidth", jr.JobName, node, jr.Status, jr.Message)
-	}
-
-	pass, warn, fail, skip := countStatuses(c.clusterResults, reports, jobResults, c.pingmeshReport)
-
-	fmt.Fprintln(c.output)
-	fmt.Fprintf(c.output, "Summary: %d PASS | %d WARN | %d FAIL | %d SKIP\n", pass, warn, fail, skip)
-
-	if fail > 0 {
-		fmt.Fprintln(c.output, "Status:  NOT READY - resolve FAIL items before deploying")
-	} else {
-		fmt.Fprintf(c.output, "Status:  %s\n", readinessStatus(fail, warn))
-	}
-
-	if c.reportStored {
-		fmt.Fprintln(c.output)
-		fmt.Fprintln(c.output, "Report:")
-		fmt.Fprintf(c.output, "  kubectl get cm %s -n %s -o jsonpath='{.data.report\\.json}' | jq .\n", reportCMName, c.opts.Namespace)
-	}
-	fmt.Fprintln(c.output)
-
-	return fail > 0
-}
-
-func (c *Controller) printJSONReport(reports []checks.NodeReport, jobResults []jobrunner.JobResult) bool {
-	pass, warn, fail, skip := countStatuses(c.clusterResults, reports, jobResults, c.pingmeshReport)
-
-	r := jsonReport{
-		Platform:      string(c.platform),
-		ClusterChecks: c.clusterResults,
-		Nodes:         reports,
-		JobResults:    jobResults,
-		Pingmesh:      c.pingmeshReport,
-		Summary:       map[string]int{"pass": pass, "warn": warn, "fail": fail, "skip": skip},
-		Status:        readinessStatus(fail, warn),
-	}
-
-	data, _ := json.MarshalIndent(r, "", "  ")
-	fmt.Fprintln(c.output, string(data))
-
-	return fail > 0
-}
