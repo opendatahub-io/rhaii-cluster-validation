@@ -1,5 +1,5 @@
 # CUDA base image (UBI9-based, includes CUDA devel + runtime, sha-pinned)
-FROM registry.redhat.io/rhai/base-image-cuda-13.0-rhel9@sha256:e29b922fee43fd4b2396768b206c280fb91482a9b141ae9dfcfafa09b7462287 AS builder
+FROM registry.redhat.io/rhai/base-image-cuda-13.0-rhel9@sha256:92ab42d7cfa739a30cce7e1b035c716502dfe6521abf0bd9a7b7b1a2e5694799 AS builder
 
 # Perftest release tarball (pre-generated configure, no autotools needed)
 # Source: https://github.com/linux-rdma/perftest/releases/tag/25.10.0-0.128
