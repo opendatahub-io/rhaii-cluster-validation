@@ -10,11 +10,12 @@ jobs:
   requests:
     cpu: "500m"
     memory: "512Mi"
-    rdma/shared_ib: "1" # Boolean flag, not a count.
+    # RDMA resource — only for ND-series VMs with InfiniBand:
+    #   rdma/shared_ib: "1"
   limits:
-    rdma/shared_ib: "1" # Boolean flag, not a count.
+    # rdma/shared_ib: "1"
   annotations: {}
-  rdma_type: ib
+  # rdma_type: ib
 
 gpu:
   min_driver_version: "535.0"

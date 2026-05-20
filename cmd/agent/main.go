@@ -55,8 +55,7 @@ func main() {
 	rootCmd.AddCommand(newTCPLatClientCmd())
 
 	if err := rootCmd.Execute(); err != nil {
-		// TODO: surface error details via structured logging or JSON
-		// instead of stderr to avoid interleaving with agent JSON output.
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -303,6 +302,7 @@ func addDeployFlags(cmd *cobra.Command, opts *controller.Options) {
 	cmd.Flags().BoolVar(&opts.Debug, "debug", false, "Keep pods alive after run for debugging")
 	cmd.Flags().StringVarP(&opts.OutputFormat, "output", "o", "table", "Output format: table or json")
 	cmd.Flags().StringSliceVar(&opts.Nodes, "nodes", nil, "Restrict to specific GPU nodes (default: all GPU nodes)")
+	cmd.Flags().StringVar(&opts.PullSecret, "pull-secret", "", "Name of an existing image pull secret to attach to the service account")
 }
 
 // --- clean subcommand ---

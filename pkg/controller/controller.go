@@ -67,6 +67,7 @@ type Options struct {
 	Debug        bool   // Skip cleanup so user can exec into pods for debugging
 	OutputFormat string // "table" (default) or "json"
 	CheckMode    string // "all", "gpu", "network", "rdma", "rdma-node", "rdma-ping", "rdma-bandwidth", "deps"
+	PullSecret   string // Name of an existing image pull secret to attach to the SA
 }
 
 // Controller orchestrates check job deployment, result collection, and cleanup.
@@ -703,13 +704,19 @@ func (c *Controller) detectAndCreateConfig(ctx context.Context) error {
 	// Check if ConfigMap already exists (user may have pre-created or customized it)
 	existing, err := c.client.CoreV1().ConfigMaps(c.opts.Namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err == nil {
-		// ConfigMap exists — merge user's overrides on top of detected defaults
-		if existingYAML, ok := existing.Data["platform.yaml"]; ok {
-			if yamlErr := yaml.Unmarshal([]byte(existingYAML), &cfg); yamlErr != nil {
-				return fmt.Errorf("failed to parse existing ConfigMap %s/%s platform.yaml: %w",
-					c.opts.Namespace, configMapName, yamlErr)
-			}
+		// ConfigMap exists — use it as the sole source of truth (not merged with defaults,
+		// because yaml.v3 Unmarshal merges maps instead of replacing them)
+		existingYAML, ok := existing.Data["platform.yaml"]
+		if !ok {
+			return fmt.Errorf("existing ConfigMap %s/%s is missing platform.yaml key — delete it and re-run, or add the key manually",
+				c.opts.Namespace, configMapName)
 		}
+		var cmCfg config.PlatformConfig
+		if yamlErr := yaml.Unmarshal([]byte(existingYAML), &cmCfg); yamlErr != nil {
+			return fmt.Errorf("failed to parse existing ConfigMap %s/%s platform.yaml: %w",
+				c.opts.Namespace, configMapName, yamlErr)
+		}
+		cfg = cmCfg
 		if err := cfg.Validate(); err != nil {
 			return fmt.Errorf("existing ConfigMap has invalid config: %w", err)
 		}
@@ -892,6 +899,9 @@ func (c *Controller) ensureRBAC(ctx context.Context) error {
 			if err != nil && !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("failed to create ServiceAccount: %w", err)
 			}
+			if err := c.ensurePullSecret(ctx, sa.Name); err != nil {
+				return err
+			}
 
 		case "ClusterRole":
 			var cr rbacv1.ClusterRole
@@ -924,6 +934,45 @@ func (c *Controller) ensureRBAC(ctx context.Context) error {
 		}
 	}
 
+	return nil
+}
+
+// ensurePullSecret ensures the --pull-secret (if specified) is attached to the
+// ServiceAccount, and preserves any existing imagePullSecrets already on the SA.
+func (c *Controller) ensurePullSecret(ctx context.Context, saName string) error {
+	sa, err := c.client.CoreV1().ServiceAccounts(c.opts.Namespace).Get(ctx, saName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get ServiceAccount %s: %w", saName, err)
+	}
+
+	secretName := c.opts.PullSecret
+	if secretName == "" {
+		return nil
+	}
+
+	secret, err := c.client.CoreV1().Secrets(c.opts.Namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("pull secret %q not found in namespace %s — create it first:\n  kubectl create secret docker-registry %s -n %s --from-file=.dockerconfigjson=<path>",
+				secretName, c.opts.Namespace, secretName, c.opts.Namespace)
+		}
+		return fmt.Errorf("failed to get pull secret %q: %w", secretName, err)
+	}
+	if secret.Type != corev1.SecretTypeDockerConfigJson {
+		return fmt.Errorf("secret %q has type %q, expected %q", secretName, secret.Type, corev1.SecretTypeDockerConfigJson)
+	}
+
+	for _, ref := range sa.ImagePullSecrets {
+		if ref.Name == secretName {
+			return nil
+		}
+	}
+
+	sa.ImagePullSecrets = append(sa.ImagePullSecrets, corev1.LocalObjectReference{Name: secretName})
+	_, err = c.client.CoreV1().ServiceAccounts(c.opts.Namespace).Update(ctx, sa, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update ServiceAccount %s with pull secret: %w", saName, err)
+	}
 	return nil
 }
 

@@ -18,7 +18,7 @@ Runs preflight checks on GPU clusters before deploying inference workloads. Vali
 
 ### Prerequisites (Non-OpenShift Clusters)
 
-On OpenShift, pull secrets are managed cluster-wide. On AKS, EKS, or other non-OCP environments, you must pre-create the namespace and configure a pull secret for `registry.redhat.io` before running validation:
+On OpenShift, pull secrets are managed cluster-wide. On AKS, EKS, or other non-OCP environments, create a pull secret for `registry.redhat.io` in the validation namespace:
 
 ```bash
 kubectl create namespace rhaii-validation 2>/dev/null || true
@@ -29,13 +29,13 @@ kubectl create secret docker-registry rhaii-pull-secret \
   2>/dev/null || true
 ```
 
-Add the pull secret to the serviceaccount
+Then pass `--pull-secret` when running validation to attach it to the service account:
+
 ```bash
-kubectl create serviceaccount rhaii-validator -n rhaii-validation 2>/dev/null || true
-kubectl patch serviceaccount rhaii-validator -n rhaii-validation \
-  -p '{"imagePullSecrets": [{"name": "rhaii-pull-secret"}]}'
+kubectl rhaii-validate all --pull-secret rhaii-pull-secret
 ```
-The tool skips SA creation if it already exists, so the patch persists across runs. However, running `kubectl rhaii-validate clean` deletes the SA, so you'll need to re-run the steps above after a clean.
+
+The tool will ensure the secret is linked to the `rhaii-validator` ServiceAccount so all Jobs can pull images.
 
 ### Option 1: Container Image (No Install)
 
@@ -46,58 +46,22 @@ The tool skips SA creation if it already exists, so the patch persists across ru
 | Tools (iperf3, ib_write_bw, ibv_rc_pingpong) | `registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0`   |
 
 
-Set the image variables and run checks:
+Run all validation checks:
 
 ```bash
 IMG=registry.redhat.io/rhoai/odh-rhaii-cluster-validator-rhel9:v3.4.0
 TOOLS=registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0
-```
 
-Check required CRDs and operator health:
 
-```bash
 podman run --rm -it \
   -v ~/.kube/config:/kubeconfig:z \
   -e KUBECONFIG=/kubeconfig \
   -e RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR=$IMG \
   -e RELATED_IMAGE_RHAII_VALIDATOR_TOOLS=$TOOLS \
-  $IMG deps
+  $IMG all --pull-secret rhaii-pull-secret
 ```
 
-GPU hardware checks (driver version, ECC errors):
-
-```bash
-podman run --rm -it \
-  -v ~/.kube/config:/kubeconfig:z \
-  -e KUBECONFIG=/kubeconfig \
-  -e RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR=$IMG \
-  -e RELATED_IMAGE_RHAII_VALIDATOR_TOOLS=$TOOLS \
-  $IMG gpu
-```
-
-TCP bandwidth and latency tests between nodes (requires 2+ GPU nodes):
-
-```bash
-podman run --rm -it \
-  -v ~/.kube/config:/kubeconfig:z \
-  -e KUBECONFIG=/kubeconfig \
-  -e RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR=$IMG \
-  -e RELATED_IMAGE_RHAII_VALIDATOR_TOOLS=$TOOLS \
-  $IMG network
-```
-
-RDMA checks (InfiniBand/RoCE clusters only — requires RDMA device plugin and 2+ GPU nodes):
-
-```bash
-podman run --rm -it \
-  -v ~/.kube/config:/kubeconfig:z \
-  -e KUBECONFIG=/kubeconfig \
-  -e RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR=$IMG \
-  -e RELATED_IMAGE_RHAII_VALIDATOR_TOOLS=$TOOLS \
-  $IMG rdma
-```
-
-Remove validation resources from the cluster:
+After running, to remove validation resources from the cluster run:
 
 ```bash
 podman run --rm -it \
@@ -106,24 +70,7 @@ podman run --rm -it \
   $IMG clean
 ```
 
-> **Note:** `clean` deletes the ServiceAccount and namespace. If you configured a pull secret in the [prerequisites](#prerequisites-non-openshift-clusters), you'll need to re-run those steps before the next validation run.
-
 > **Upstream images:** For development or non-RHOAI use, substitute `quay.io/opendatahub/odh-rhaii-cluster-validator:latest` and `quay.io/opendatahub/odh-rhaii-validator-tools:odh-stable`.
-
-#### Running All Checks Together
-
-You can run all checks (deps + gpu + network + rdma) in a single command:
-
-```bash
-podman run --rm -it \
-  -v ~/.kube/config:/kubeconfig:z \
-  -e KUBECONFIG=/kubeconfig \
-  -e RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR=$IMG \
-  -e RELATED_IMAGE_RHAII_VALIDATOR_TOOLS=$TOOLS \
-  $IMG all
-```
-
-Note that `all` includes RDMA checks and may fail or time out on environments without RDMA support (Infiniband or RoCE). Use the individual subcommands above if your environment does not support RDMA.
 
 ### Option 2: Download Binary (Linux, No Build Required)
 
