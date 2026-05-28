@@ -12,7 +12,8 @@ import (
 )
 
 // ValidDeviceName matches safe RDMA device names (e.g., mlx5_0, ibp0).
-var ValidDeviceName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+// Must start with a letter or digit to reject argument-like strings ("-flag").
+var ValidDeviceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // Check is the interface all validation checks must implement.
 type Check interface {
@@ -119,6 +120,13 @@ func (p *GPUNICPair) UnmarshalJSON(data []byte) error {
 	}
 	if err := json.Unmarshal(data, &slim); err != nil {
 		return err
+	}
+	if slim.GPUID < 0 || slim.GPUNUMA < 0 || slim.NICNUMA < 0 || slim.PCIeHops < 0 {
+		return fmt.Errorf("invalid GPUNICPair: negative value (gpu_id=%d, gpu_numa=%d, nic_numa=%d, pcie_hops=%d)",
+			slim.GPUID, slim.GPUNUMA, slim.NICNUMA, slim.PCIeHops)
+	}
+	if !ValidDeviceName.MatchString(slim.NICDev) {
+		return fmt.Errorf("invalid GPUNICPair: bad nic_dev %q", slim.NICDev)
 	}
 	p.GPU = GPUInfo{ID: slim.GPUID, NUMA: slim.GPUNUMA}
 	p.NIC = NICInfo{Dev: slim.NICDev, NUMA: slim.NICNUMA}

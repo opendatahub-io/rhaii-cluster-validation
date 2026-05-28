@@ -75,6 +75,30 @@ func TestGPUNICPairUnmarshalJSON(t *testing.T) {
 	}
 }
 
+func TestGPUNICPairUnmarshalValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"negative gpu_id", `{"gpu_id":-1,"gpu_numa":0,"nic_dev":"mlx5_0","nic_numa":0,"pcie_hops":3}`},
+		{"negative gpu_numa", `{"gpu_id":0,"gpu_numa":-1,"nic_dev":"mlx5_0","nic_numa":0,"pcie_hops":3}`},
+		{"negative nic_numa", `{"gpu_id":0,"gpu_numa":0,"nic_dev":"mlx5_0","nic_numa":-1,"pcie_hops":3}`},
+		{"negative pcie_hops", `{"gpu_id":0,"gpu_numa":0,"nic_dev":"mlx5_0","nic_numa":0,"pcie_hops":-1}`},
+		{"empty nic_dev", `{"gpu_id":0,"gpu_numa":0,"nic_dev":"","nic_numa":0,"pcie_hops":3}`},
+		{"nic_dev with spaces", `{"gpu_id":0,"gpu_numa":0,"nic_dev":"mlx5 0","nic_numa":0,"pcie_hops":3}`},
+		{"nic_dev with slash", `{"gpu_id":0,"gpu_numa":0,"nic_dev":"../etc","nic_numa":0,"pcie_hops":3}`},
+		{"nic_dev with dash prefix", `{"gpu_id":0,"gpu_numa":0,"nic_dev":"-flag","nic_numa":0,"pcie_hops":3}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var pair GPUNICPair
+			if err := json.Unmarshal([]byte(tc.json), &pair); err == nil {
+				t.Errorf("expected error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
 func TestNodeTopologyJSONRoundTrip(t *testing.T) {
 	topo := NodeTopology{
 		GPUNICPCIeMapping: "0001:00:00.0=0101:00:00.0,0002:00:00.0=0102:00:00.0",
