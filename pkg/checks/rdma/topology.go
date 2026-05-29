@@ -287,6 +287,9 @@ func discoverNICs(ctx context.Context, rdmaType config.RDMAType) ([]checks.NICIn
 			pciAddr = ""
 			pciePath = nil
 		}
+		if !hasRDMACapability(ctx, dev) {
+			continue
+		}
 		if rdmaType == config.RDMATypeIB && linkLayer != checks.LinkLayerInfiniBand {
 			continue
 		}
