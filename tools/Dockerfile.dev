@@ -48,7 +48,7 @@ RUN dnf install -y \
     && dnf clean all
 
 # Install RDMA libraries (matches what perftest was compiled against)
-RUN dnf install -y libibverbs libibumad librdmacm infiniband-diags && dnf clean all
+RUN dnf install -y libibverbs libibverbs-utils libibumad librdmacm infiniband-diags && dnf clean all
 
 # Copy perftest binaries from builder
 COPY --from=builder /install/usr/bin/* /usr/local/bin/
