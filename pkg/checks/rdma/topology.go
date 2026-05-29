@@ -63,14 +63,20 @@ func (c *TopologyCheck) Run(ctx context.Context) checks.Result {
 
 	pairs, flat, strategy := buildPairs(gpus, nics)
 
+	var mappings []string
+	for _, p := range pairs {
+		mappings = append(mappings, fmt.Sprintf("%s=%s", p.GPU.PCIAddr, p.NIC.PCIAddr))
+	}
+
 	topo := &checks.NodeTopology{
-		GPUCount:        len(gpus),
-		NICCount:        len(nics),
-		IsFlat:          flat,
-		PairingStrategy: strategy,
-		GPUList:         gpus,
-		NICList:         nics,
-		Pairs:           pairs,
+		GPUNICPCIeMapping: strings.Join(mappings, ","),
+		GPUCount:          len(gpus),
+		NICCount:          len(nics),
+		IsFlat:            flat,
+		PairingStrategy:   strategy,
+		GPUList:           gpus,
+		NICList:           nics,
+		Pairs:             pairs,
 	}
 
 	r.Details = topo

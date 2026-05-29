@@ -1471,11 +1471,20 @@ func (c *Controller) resolvePingMeshRDMAType(topoMap map[string]*checks.NodeTopo
 		return rt, nil
 	}
 
-	// Infer from topology link layers
+	// Infer from paired NICs' link layers. Slim pairs don't carry LinkLayer,
+	// so look up each paired NIC device in the fully-deserialized NICList.
 	linkLayers := make(map[checks.LinkLayer]bool)
 	for _, topo := range topoMap {
+		nicByDev := make(map[string]checks.LinkLayer, len(topo.NICList))
+		for _, nic := range topo.NICList {
+			nicByDev[nic.Dev] = nic.LinkLayer
+		}
 		for _, pair := range topo.Pairs {
-			linkLayers[pair.NIC.LinkLayer] = true
+			ll, ok := nicByDev[pair.NIC.Dev]
+			if !ok {
+				return "", fmt.Errorf("paired NIC %q not found in NICList for topology inference", pair.NIC.Dev)
+			}
+			linkLayers[ll] = true
 		}
 	}
 
