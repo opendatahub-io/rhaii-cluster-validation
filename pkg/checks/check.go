@@ -12,7 +12,8 @@ import (
 )
 
 // ValidDeviceName matches safe RDMA device names (e.g., mlx5_0, ibp0).
-var ValidDeviceName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+// Must start with a letter or digit to reject argument-like strings ("-flag").
+var ValidDeviceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // Check is the interface all validation checks must implement.
 type Check interface {
@@ -81,21 +82,68 @@ type NICInfo struct {
 }
 
 // GPUNICPair represents a GPU paired with its closest RDMA NIC.
+// In memory it holds the full GPUInfo and NICInfo for controller use.
+// JSON serialization outputs only the essential fields (gpu_id, gpu_numa,
+// nic_dev, nic_numa, pcie_hops) to avoid repeating data already present
+// in gpu_list/nic_list.
 type GPUNICPair struct {
-	GPU      GPUInfo `json:"gpu"`
-	NIC      NICInfo `json:"nic"`
-	PCIeHops int     `json:"pcie_hops"`
+	GPU      GPUInfo
+	NIC      NICInfo
+	PCIeHops int
+}
+
+// MarshalJSON outputs a slim representation of the pair.
+func (p GPUNICPair) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		GPUID    int    `json:"gpu_id"`
+		GPUNUMA  int    `json:"gpu_numa"`
+		NICDev   string `json:"nic_dev"`
+		NICNUMA  int    `json:"nic_numa"`
+		PCIeHops int    `json:"pcie_hops"`
+	}{
+		GPUID:    p.GPU.ID,
+		GPUNUMA:  p.GPU.NUMA,
+		NICDev:   p.NIC.Dev,
+		NICNUMA:  p.NIC.NUMA,
+		PCIeHops: p.PCIeHops,
+	})
+}
+
+// UnmarshalJSON reconstructs a GPUNICPair from slim JSON.
+func (p *GPUNICPair) UnmarshalJSON(data []byte) error {
+	var slim struct {
+		GPUID    int    `json:"gpu_id"`
+		GPUNUMA  int    `json:"gpu_numa"`
+		NICDev   string `json:"nic_dev"`
+		NICNUMA  int    `json:"nic_numa"`
+		PCIeHops int    `json:"pcie_hops"`
+	}
+	if err := json.Unmarshal(data, &slim); err != nil {
+		return err
+	}
+	if slim.GPUID < 0 || slim.GPUNUMA < 0 || slim.NICNUMA < 0 || slim.PCIeHops < 0 {
+		return fmt.Errorf("invalid GPUNICPair: negative value (gpu_id=%d, gpu_numa=%d, nic_numa=%d, pcie_hops=%d)",
+			slim.GPUID, slim.GPUNUMA, slim.NICNUMA, slim.PCIeHops)
+	}
+	if !ValidDeviceName.MatchString(slim.NICDev) {
+		return fmt.Errorf("invalid GPUNICPair: bad nic_dev %q", slim.NICDev)
+	}
+	p.GPU = GPUInfo{ID: slim.GPUID, NUMA: slim.GPUNUMA}
+	p.NIC = NICInfo{Dev: slim.NICDev, NUMA: slim.NICNUMA}
+	p.PCIeHops = slim.PCIeHops
+	return nil
 }
 
 // NodeTopology holds the GPU-NIC-NUMA mapping for a node.
 type NodeTopology struct {
-	GPUCount        int             `json:"gpu_count"`
-	NICCount        int             `json:"nic_count"`
-	IsFlat          bool            `json:"is_flat"`
-	PairingStrategy PairingStrategy `json:"pairing_strategy"`
-	GPUList         []GPUInfo       `json:"gpu_list,omitempty"`
-	NICList         []NICInfo       `json:"nic_list,omitempty"`
-	Pairs           []GPUNICPair    `json:"pairs"`
+	GPUNICPCIeMapping string          `json:"gpu_nic_pcie_mapping"`
+	GPUCount          int             `json:"gpu_count"`
+	NICCount          int             `json:"nic_count"`
+	IsFlat            bool            `json:"is_flat"`
+	PairingStrategy   PairingStrategy `json:"pairing_strategy"`
+	GPUList           []GPUInfo       `json:"gpu_list,omitempty"`
+	NICList           []NICInfo       `json:"nic_list,omitempty"`
+	Pairs             []GPUNICPair    `json:"pairs"`
 }
 
 // NodeReport is the complete output from an agent run on a single node.
