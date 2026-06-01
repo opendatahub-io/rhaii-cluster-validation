@@ -84,7 +84,11 @@ func (c *TopologyCheck) Run(ctx context.Context) checks.Result {
 	switch {
 	case len(nics) == 0:
 		r.Status = checks.StatusWarn
-		r.Message = fmt.Sprintf("%d GPU(s), 0 NIC(s): no RDMA NICs found matching rdma_type=%q", len(gpus), c.rdmaType)
+		if c.rdmaType == "" {
+			r.Message = fmt.Sprintf("%d GPU(s), 0 NIC(s): no RDMA-capable NICs found", len(gpus))
+		} else {
+			r.Message = fmt.Sprintf("%d GPU(s), 0 NIC(s): no RDMA NICs found matching rdma_type=%q", len(gpus), c.rdmaType)
+		}
 		return r
 	case len(gpus) > len(nics):
 		r.Status = checks.StatusWarn
