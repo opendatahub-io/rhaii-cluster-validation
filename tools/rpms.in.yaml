@@ -21,6 +21,7 @@ packages:
   - tcpdump
   - pciutils
   - libibverbs
+  - libibverbs-utils
   - libibumad
   - librdmacm
   - infiniband-diags

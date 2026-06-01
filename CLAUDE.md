@@ -250,6 +250,41 @@ make clean-all          # Remove everything including ConfigMap
 make test               # Run unit tests
 ```
 
+## RPM Lockfiles (Konflux Hermetic Builds)
+
+Konflux builds use [rpm-lockfile-prototype](https://github.com/konflux-ci/rpm-lockfile-prototype) to prefetch RPMs for hermetic builds. Three lockfile sets cover the two container images:
+
+| Lockfile directory | Image | Stage | Repo source |
+|---|---|---|---|
+| `rpms.in.yaml` (root) | cluster-validation | runtime (UBI9) | `rpm-repos/ubi.repo` |
+| `tools/rpms.in.yaml` | validator-tools | runtime (UBI9) | `rpm-repos/ubi.repo` |
+| `tools/builder/rpms.in.yaml` | validator-tools | builder (CUDA) | `rpm-repos/redhat.repo` |
+
+The builder and runtime stages are split because the CUDA base image has older packages than UBI9 — resolving both against a single base image causes version conflicts.
+
+**Adding a new RPM package:**
+
+1. Add the package to the relevant `dnf install` in the Dockerfile
+2. Add the package to the matching `rpms.in.yaml` (check which stage installs it)
+3. Regenerate the lockfile:
+   ```bash
+   # Root (cluster-validation runtime)
+   rpm-lockfile-prototype --outfile rpms.lock.yaml rpms.in.yaml
+
+   # Tools runtime
+   rpm-lockfile-prototype --outfile tools/rpms.lock.yaml tools/rpms.in.yaml
+
+   # Tools builder (requires RHEL entitlement certs on the host)
+   rpm-lockfile-prototype --outfile tools/builder/rpms.lock.yaml tools/builder/rpms.in.yaml
+   ```
+4. Commit both the `rpms.in.yaml` and `rpms.lock.yaml` changes
+
+**Repo files:**
+- `rpm-repos/ubi.repo` — UBI9 repos (public, no auth). Section headers use `ubi-9-for-$basearch-*` naming to match Conforma's allowed repo ID list.
+- `rpm-repos/redhat.repo` — RHEL 9.6 EUS repos (requires entitlement certs). The cert paths in the file are placeholders — Konflux mounts real certs at build time via activation key.
+
+**MintMaker** automatically opens PRs to refresh lockfiles on release branches. On `main`, regenerate manually when adding/updating packages.
+
 ## Coding Conventions
 
 - All per-node checks implement `Check` interface
