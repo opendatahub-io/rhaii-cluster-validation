@@ -65,7 +65,10 @@ download:
 	fi
 	@echo "Downloading kubectl plugin from container image..."
 	$(CONTAINER_RUNTIME) pull $(IMG)
-	$(CONTAINER_RUNTIME) run --rm --entrypoint cat $(IMG) /usr/local/bin/rhaii-validator > kubectl-rhaii_validate
+	$(CONTAINER_RUNTIME) rm -f rhaii-extract >/dev/null 2>&1 || true
+	$(CONTAINER_RUNTIME) create --name rhaii-extract "$(IMG)" >/dev/null
+	$(CONTAINER_RUNTIME) cp rhaii-extract:/usr/local/bin/rhaii-validator kubectl-rhaii_validate; \
+		$(CONTAINER_RUNTIME) rm -f rhaii-extract >/dev/null 2>&1 || true
 	chmod +x kubectl-rhaii_validate
 	sudo mv kubectl-rhaii_validate /usr/local/bin/
 	@echo "Installed! Run: kubectl rhaii-validate all"
