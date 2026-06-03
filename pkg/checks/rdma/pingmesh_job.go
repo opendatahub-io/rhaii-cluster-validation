@@ -60,34 +60,21 @@ func (j *PingMeshJob) SetPodConfig(cfg *jobrunner.PodConfig) {
 	if cfg == nil {
 		cfg = &jobrunner.PodConfig{}
 	}
-	// Deep-copy to avoid races when multiple PingMeshJobs share a source PodConfig
-	// (the controller passes the same rdmaCfg to all jobs, and RunPairwise goroutines
-	// later mutate NameSuffix concurrently).
-	copy := &jobrunner.PodConfig{
-		Privileged: true,
-		NameSuffix: cfg.NameSuffix,
+	clone := cfg.Clone()
+	clone.Privileged = true
+	// Device resources (GPU, RDMA) must have equal requests and limits (K8s requirement)
+	if clone.ResourceLimits == nil {
+		clone.ResourceLimits = make(map[string]string)
 	}
-	copy.ResourceRequests = make(map[string]string, len(cfg.ResourceRequests))
-	for k, v := range cfg.ResourceRequests {
-		copy.ResourceRequests[k] = v
-	}
-	copy.ResourceLimits = make(map[string]string, len(cfg.ResourceLimits))
-	for k, v := range cfg.ResourceLimits {
-		copy.ResourceLimits[k] = v
-	}
-	copy.Annotations = make(map[string]string, len(cfg.Annotations))
-	for k, v := range cfg.Annotations {
-		copy.Annotations[k] = v
-	}
-	for k, v := range copy.ResourceRequests {
+	for k, v := range clone.ResourceRequests {
 		if k == "cpu" || k == "memory" {
 			continue
 		}
-		if _, ok := copy.ResourceLimits[k]; !ok {
-			copy.ResourceLimits[k] = v
+		if _, ok := clone.ResourceLimits[k]; !ok {
+			clone.ResourceLimits[k] = v
 		}
 	}
-	j.PodCfg = copy
+	j.PodCfg = clone
 }
 
 func (j *PingMeshJob) SetNameSuffix(suffix string) {
