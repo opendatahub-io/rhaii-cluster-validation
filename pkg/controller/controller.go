@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -566,24 +567,26 @@ func (c *Controller) Run(ctx context.Context) error {
 	// Step 7b: Run pingmesh RDMA connectivity test
 	needPingMesh := c.opts.CheckMode == CheckModeRDMA || c.opts.CheckMode == CheckModeRDMAPing || c.opts.CheckMode == CheckModeAll
 	if needPingMesh && len(gpuNodes) >= 2 {
-		// Load topology if rdma-node didn't run this session
 		pmNetReports := netReports
-		if len(pmNetReports) == 0 {
+		if !needNetChecks || len(pmNetReports) == 0 {
+			// rdma-node didn't run this session — load topology from stored report
 			stored, topoErr := c.loadTopologyFromReport(ctx, gpuNodes)
 			if topoErr != nil {
 				fmt.Fprintf(c.output, "  Warning: %v\n", topoErr)
 				fmt.Fprintln(c.output, "  Hint: run 'kubectl rhaii-validate rdma-node' first to generate topology")
+				c.pingmeshReport = skipPingMeshReport("Skipped: topology incomplete for all GPU nodes")
 			} else {
 				pmNetReports = stored
 				fmt.Fprintf(c.output, "  Loaded topology for %d node(s) from stored report\n", len(stored))
 			}
 		} else if !topologyCoversAllNodes(pmNetReports, gpuNodes) {
-			fmt.Fprintf(c.output, "  Warning: in-session topology incomplete for all GPU nodes, skipping pingmesh\n")
-			fmt.Fprintln(c.output, "  Hint: run 'kubectl rhaii-validate rdma-node' on all GPU nodes first")
+			// rdma-node ran this session but topology collection failed for some nodes
+			fmt.Fprintf(c.output, "  Warning: in-session topology incomplete (rdma-node failed for some nodes), skipping pingmesh\n")
 			pmNetReports = nil
+			c.pingmeshReport = skipPingMeshReport("Skipped: topology incomplete for all GPU nodes")
 		}
 		if len(pmNetReports) > 0 {
-			fmt.Fprintln(c.output, "[Step 7b] Running RDMA connectivity mesh (pingmesh)...")
+			fmt.Fprintln(c.output, "[Step 7b] Running RDMA connectivity mesh (PingMesh)...")
 			if err := c.runPingMesh(ctx, gpuNodes, pmNetReports); err != nil {
 				fmt.Fprintf(c.output, "  Warning: pingmesh error: %v\n", err)
 			}
@@ -1124,18 +1127,18 @@ func sanitizeNodeName(name string) string {
 // then reads the JSON report from each Job's pod logs.
 func (c *Controller) waitAndCollectGpuCheckJobs(ctx context.Context) ([]checks.NodeReport, error) {
 	selector := checkJobLabelKey + "=" + gpuCheckJobLabelValue
-	return c.waitAndCollectJobsBySelector(ctx, selector, "GPU check")
+	return c.waitAndCollectJobsBySelector(ctx, selector, "GPU check", "gpu_hardware")
 }
 
 // waitAndCollectNetCheckJobs polls until all RDMA node check Jobs have completed,
 // then reads the JSON report from each Job's pod logs.
 func (c *Controller) waitAndCollectNetCheckJobs(ctx context.Context) ([]checks.NodeReport, error) {
 	selector := checkJobLabelKey + "=" + netCheckJobLabelValue
-	return c.waitAndCollectJobsBySelector(ctx, selector, "RDMA node check")
+	return c.waitAndCollectJobsBySelector(ctx, selector, "RDMA node check", "networking_rdma")
 }
 
 // waitAndCollectJobsBySelector is the generic polling loop for check Jobs.
-func (c *Controller) waitAndCollectJobsBySelector(ctx context.Context, selector, jobKind string) ([]checks.NodeReport, error) {
+func (c *Controller) waitAndCollectJobsBySelector(ctx context.Context, selector, jobKind, checkCategory string) ([]checks.NodeReport, error) {
 	timeout := time.After(c.opts.Timeout)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -1145,9 +1148,9 @@ func (c *Controller) waitAndCollectJobsBySelector(ctx context.Context, selector,
 	for {
 		select {
 		case <-ctx.Done():
-			return c.collectAvailableJobs(ctx, selector, ctx.Err())
+			return c.collectAvailableJobs(ctx, selector, checkCategory, ctx.Err())
 		case <-timeout:
-			return c.collectAvailableJobs(ctx, selector,
+			return c.collectAvailableJobs(ctx, selector, checkCategory,
 				fmt.Errorf("timed out waiting for %s jobs after %v", jobKind, c.opts.Timeout))
 		case <-ticker.C:
 			jobs, err := c.client.BatchV1().Jobs(c.opts.Namespace).List(ctx, metav1.ListOptions{
@@ -1175,14 +1178,14 @@ func (c *Controller) waitAndCollectJobsBySelector(ctx context.Context, selector,
 			fmt.Fprintln(c.output)
 
 			if completed >= expected {
-				return c.collectFromJobs(ctx, jobs.Items)
+				return c.collectFromJobs(ctx, jobs.Items, checkCategory)
 			}
 		}
 	}
 }
 
 // collectFromJobs reads the JSON report from each completed Job's pod logs.
-func (c *Controller) collectFromJobs(ctx context.Context, jobs []batchv1.Job) ([]checks.NodeReport, error) {
+func (c *Controller) collectFromJobs(ctx context.Context, jobs []batchv1.Job, checkCategory string) ([]checks.NodeReport, error) {
 	var reports []checks.NodeReport
 
 	for _, job := range jobs {
@@ -1197,6 +1200,29 @@ func (c *Controller) collectFromJobs(ctx context.Context, jobs []batchv1.Job) ([
 		report, err := c.collectFromPod(ctx, pods.Items[0])
 		if err != nil {
 			fmt.Fprintf(c.output, "  Warning: %v\n", err)
+			nodeName := pods.Items[0].Spec.NodeSelector["kubernetes.io/hostname"]
+			if nodeName == "" {
+				nodeName = job.Name
+			}
+			errMsg := err.Error()
+			if inner := errors.Unwrap(err); inner != nil {
+				errMsg = inner.Error()
+			}
+			checkNames := checkNamesForCategory(checkCategory)
+			var results []checks.Result
+			for _, name := range checkNames {
+				results = append(results, checks.Result{
+					Node:     nodeName,
+					Category: checkCategory,
+					Name:     name,
+					Status:   checks.StatusFail,
+					Message:  errMsg,
+				})
+			}
+			reports = append(reports, checks.NodeReport{
+				Node:    nodeName,
+				Results: results,
+			})
 			continue
 		}
 		reports = append(reports, *report)
@@ -1208,7 +1234,7 @@ func (c *Controller) collectFromJobs(ctx context.Context, jobs []batchv1.Job) ([
 // collectAvailableJobs gathers results from whatever Jobs completed before the
 // timeout or cancellation. Reports which nodes are missing and returns partial
 // results alongside the original error so the caller can still produce a report.
-func (c *Controller) collectAvailableJobs(ctx context.Context, selector string, origErr error) ([]checks.NodeReport, error) {
+func (c *Controller) collectAvailableJobs(ctx context.Context, selector, checkCategory string, origErr error) ([]checks.NodeReport, error) {
 	listCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -1226,7 +1252,7 @@ func (c *Controller) collectAvailableJobs(ctx context.Context, selector string, 
 		}
 	}
 
-	reports, _ := c.collectFromJobs(listCtx, completedJobs)
+	reports, _ := c.collectFromJobs(listCtx, completedJobs, checkCategory)
 
 	collected := make(map[string]bool)
 	for _, r := range reports {
@@ -1660,6 +1686,29 @@ func buildRailMap(topo *checks.NodeTopology) map[string]int {
 }
 
 // pingMeshStatus returns PASS/WARN/FAIL based on passed/total counts.
+// checkNamesForCategory returns the individual check names for a given category,
+// used when a node's report fails to parse and we need to emit per-check FAIL rows.
+func checkNamesForCategory(category string) []string {
+	switch category {
+	case "networking_rdma":
+		return []string{"rdma_devices_detected", "rdma_nic_status", "gpu_nic_topology"}
+	case "gpu_hardware":
+		return []string{"gpu_driver_version", "gpu_ecc_status"}
+	default:
+		return []string{"node_report_collection"}
+	}
+}
+
+// skipPingMeshReport returns a PingMeshReport with SKIP status for both checks.
+func skipPingMeshReport(message string) *rdma.PingMeshReport {
+	return &rdma.PingMeshReport{
+		Summary: map[string]rdma.PingMeshCheckSummary{
+			"rdma_conn_rail":  {Status: checks.StatusSkip, Message: message},
+			"rdma_conn_xrail": {Status: checks.StatusSkip, Message: message},
+		},
+	}
+}
+
 func pingMeshStatus(passed, total int) checks.Status {
 	switch {
 	case total == 0:
@@ -1893,10 +1942,10 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 			fmt.Fprintf(c.output, "  RDMA PD job: GPU%d ↔ %s (NUMA:%d↔%d)\n", pair.GPU.ID, pair.NIC.Dev, pair.GPU.NUMA, pair.NIC.NUMA)
 
 			if !uniqueDevices[pair.NIC.Dev] {
-					rdmaDevices = append(rdmaDevices, pair.NIC.Dev)
-					gpuIDs = append(gpuIDs, pair.GPU.ID)
-					uniqueDevices[pair.NIC.Dev] = true
-				}
+				rdmaDevices = append(rdmaDevices, pair.NIC.Dev)
+				gpuIDs = append(gpuIDs, pair.GPU.ID)
+				uniqueDevices[pair.NIC.Dev] = true
+			}
 		}
 
 		// Add WEP job if multiple NICs available
