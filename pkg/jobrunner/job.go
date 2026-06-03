@@ -42,6 +42,31 @@ type PodConfig struct {
 	NameSuffix       string           `json:"-" yaml:"-"` // appended to job name for uniqueness (e.g. round/attempt)
 }
 
+// Clone returns a deep copy of the PodConfig, including all map fields.
+// Use this to avoid shared mutable state when the same base config is
+// assigned to multiple jobs that may later mutate their copy independently.
+func (pc *PodConfig) Clone() *PodConfig {
+	if pc == nil {
+		return nil
+	}
+	clone := *pc
+	clone.Annotations = cloneStringMap(pc.Annotations)
+	clone.ResourceRequests = cloneStringMap(pc.ResourceRequests)
+	clone.ResourceLimits = cloneStringMap(pc.ResourceLimits)
+	return &clone
+}
+
+func cloneStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 // ToResourceRequirements converts PodConfig resource maps to K8s ResourceRequirements.
 func (pc *PodConfig) ToResourceRequirements() (corev1.ResourceRequirements, error) {
 	reqs := corev1.ResourceRequirements{}

@@ -1827,35 +1827,28 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 		break
 	}
 
-	// Check if RDMA resource is configured in jobs.requests or jobs.limits
-	rdmaAvailable := false
-	for _, resources := range []map[string]string{c.cfg.Jobs.Requests, c.cfg.Jobs.Limits} {
-		for k := range resources {
-			if strings.Contains(k, "rdma") || strings.Contains(k, "roce") || strings.Contains(k, "hca") {
-				rdmaAvailable = true
-				break
-			}
-		}
-	}
+	// RDMA availability is determined by topology: if net-checks found
+	// RDMA NICs paired with GPUs, RDMA tests should run. The RDMA resource
+	// request (rdma/shared_ib, rdma/ib, etc.) is can be a boolean flag for device
+	// plugin access, not a device count.
+	rdmaAvailable := len(topo.Pairs) > 0
 
 	var jobs []jobrunner.Job
 	for _, job := range c.jobs {
 		if job.Name() != "ib-write-bw" {
-			// Non-RDMA jobs (iperf3): keep as-is
 			jobs = append(jobs, job)
 			continue
 		}
 
 		if !rdmaAvailable {
-			fmt.Fprintf(c.output, "  Skipping RDMA jobs: no RDMA device plugin on nodes\n")
+			fmt.Fprintf(c.output, "  Skipping RDMA jobs: no RDMA NICs found in topology\n")
 			return jobs, []jobrunner.JobResult{{
 				JobName: "ib-write-bw",
 				Status:  checks.StatusSkip,
-				Message: "RDMA skipped: no RDMA device plugin found on nodes (rdma/* resources not in node allocatable)",
+				Message: "RDMA skipped: no RDMA NICs found in GPU-NIC topology (run rdma-node first)",
 			}}
 		}
 
-		// Get original job config
 		var origPodCfg *jobrunner.PodConfig
 		var origServerImg, origClientImg string
 		if orig, ok := job.(*rdma.RDMABandwidthJob); ok {
@@ -1864,80 +1857,52 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 			origClientImg = orig.ClientImage
 		}
 
-		// Check how many RDMA devices are requested
-		// If requesting all (>= NIC count), we can specify -d per device
-		// If requesting 1, let ib_write_bw auto-detect (can't control which device we get)
-		rdmaCount := 0
-		for k, v := range c.cfg.Jobs.Requests {
-			if strings.Contains(k, "rdma") || strings.Contains(k, "roce") || strings.Contains(k, "hca") {
-				fmt.Sscanf(v, "%d", &rdmaCount)
-				break
-			}
-		}
-		hasAllDevices := rdmaCount >= len(topo.Pairs)
-
 		// GPUDirect RDMA: request all GPUs so the NVIDIA container runtime
 		// injects CUDA libraries and --use_cuda sees correct GPU indices
-		gpuResourcesAvailable := hasAllDevices && c.gpuResource != "" && topo.GPUCount > 0 && origPodCfg != nil
-		if gpuResourcesAvailable {
+		if c.gpuResource != "" && topo.GPUCount > 0 && origPodCfg != nil {
 			gpuCountStr := fmt.Sprintf("%d", topo.GPUCount)
 			origPodCfg.ResourceRequests[string(c.gpuResource)] = gpuCountStr
 			origPodCfg.ResourceLimits[string(c.gpuResource)] = gpuCountStr
 		}
 
-		// Collect devices and GPU IDs for WEP
-		var devices []string
+		// Collect unique RDMA devices for the WEP (whole-endpoint) job.
+		// Multiple GPUs may share the same NIC (e.g. GPU0↔mlx5_0, GPU1↔mlx5_0),
+		// so we deduplicate to avoid running ib_write_bw on the same NIC twice.
+		var rdmaDevices []string
 		var gpuIDs []int
 		uniqueDevices := make(map[string]bool)
 
 		cfgQPs := c.cfg.Jobs.RDMA.QPs
 		cfgMsgSize := c.cfg.Jobs.RDMA.MessageSize
 
-		if hasAllDevices {
-			// Requesting all RDMA devices — create one PD job per GPU-NIC pair
-			for _, pair := range topo.Pairs {
-				rdmaJob := rdma.NewRDMABandwidthJob(c.cfg.Thresholds.RDMABandwidthPD.Pass, c.cfg.Thresholds.RDMABandwidthPD.Warn, nil)
-				rdmaJob.PodCfg = origPodCfg
-				rdmaJob.ServerImage = origServerImg
-				rdmaJob.ClientImage = origClientImg
-				rdmaJob.Device = pair.NIC.Dev
-				rdmaJob.UseCUDA = pair.GPU.ID
-				if cfgQPs > 0 {
-					rdmaJob.QPs = cfgQPs
-				}
-				if cfgMsgSize > 0 {
-					rdmaJob.MessageSize = cfgMsgSize
-				}
-				jobs = append(jobs, rdmaJob)
-				fmt.Fprintf(c.output, "  RDMA PD job: GPU%d ↔ %s (NUMA:%d↔%d)\n", pair.GPU.ID, pair.NIC.Dev, pair.GPU.NUMA, pair.NIC.NUMA)
-
-				if !uniqueDevices[pair.NIC.Dev] {
-					devices = append(devices, pair.NIC.Dev)
-					gpuIDs = append(gpuIDs, pair.GPU.ID)
-					uniqueDevices[pair.NIC.Dev] = true
-				}
-			}
-		} else {
-			// Requesting fewer RDMA devices — single PD job, auto-detect device
+		// Create one PD job per GPU-NIC pair from topology
+		for _, pair := range topo.Pairs {
 			rdmaJob := rdma.NewRDMABandwidthJob(c.cfg.Thresholds.RDMABandwidthPD.Pass, c.cfg.Thresholds.RDMABandwidthPD.Warn, nil)
-			rdmaJob.PodCfg = origPodCfg
+			rdmaJob.PodCfg = origPodCfg.Clone()
 			rdmaJob.ServerImage = origServerImg
 			rdmaJob.ClientImage = origClientImg
+			rdmaJob.Device = pair.NIC.Dev
+			rdmaJob.UseCUDA = pair.GPU.ID
 			if cfgQPs > 0 {
 				rdmaJob.QPs = cfgQPs
 			}
 			if cfgMsgSize > 0 {
 				rdmaJob.MessageSize = cfgMsgSize
 			}
-			// No Device or UseCUDA set — ib_write_bw auto-detects
 			jobs = append(jobs, rdmaJob)
-			fmt.Fprintf(c.output, "  RDMA PD job: auto-detect device (requesting %d RDMA resource)\n", rdmaCount)
+			fmt.Fprintf(c.output, "  RDMA PD job: GPU%d ↔ %s (NUMA:%d↔%d)\n", pair.GPU.ID, pair.NIC.Dev, pair.GPU.NUMA, pair.NIC.NUMA)
+
+			if !uniqueDevices[pair.NIC.Dev] {
+					rdmaDevices = append(rdmaDevices, pair.NIC.Dev)
+					gpuIDs = append(gpuIDs, pair.GPU.ID)
+					uniqueDevices[pair.NIC.Dev] = true
+				}
 		}
 
-		// Add WEP job if requesting all devices and multiple NICs available
-		if hasAllDevices && len(devices) > 1 {
-			wepJob := rdma.NewRDMAWEPJob(c.cfg.Thresholds.RDMABandwidthWEP.Pass, c.cfg.Thresholds.RDMABandwidthWEP.Warn, devices, gpuIDs)
-			wepJob.PodCfg = origPodCfg
+		// Add WEP job if multiple NICs available
+		if len(rdmaDevices) > 1 {
+			wepJob := rdma.NewRDMAWEPJob(c.cfg.Thresholds.RDMABandwidthWEP.Pass, c.cfg.Thresholds.RDMABandwidthWEP.Warn, rdmaDevices, gpuIDs)
+			wepJob.PodCfg = origPodCfg.Clone()
 			wepJob.ServerImage = origServerImg
 			wepJob.ClientImage = origClientImg
 			if cfgQPs > 0 {
@@ -1947,9 +1912,9 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 				wepJob.MessageSize = cfgMsgSize
 			}
 			jobs = append(jobs, wepJob)
-			fmt.Fprintf(c.output, "  RDMA WEP job: %d NICs in parallel (%s)\n", len(devices), strings.Join(devices, ", "))
+			fmt.Fprintf(c.output, "  RDMA WEP job: %d NICs in parallel (%s)\n", len(rdmaDevices), strings.Join(rdmaDevices, ", "))
 		} else {
-			fmt.Fprintf(c.output, "  RDMA WEP skipped: only %d NIC(s), need 2+ for whole-endpoint test\n", len(devices))
+			fmt.Fprintf(c.output, "  RDMA WEP skipped: only %d NIC(s), need 2+ for whole-endpoint test\n", len(rdmaDevices))
 		}
 	}
 
