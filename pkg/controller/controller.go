@@ -18,6 +18,7 @@ import (
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/config"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/jobrunner"
 
+	"gopkg.in/yaml.v3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -26,18 +27,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"gopkg.in/yaml.v3"
 	k8syaml "sigs.k8s.io/yaml"
 )
 
 const (
-	checkJobLabelKey          = "app"
-	gpuCheckJobLabelValue     = "rhaii-validate-gpu-check"
-	netCheckJobLabelValue     = "rhaii-validate-net-check"
-	configMapName             = "rhaii-validate-config"
-	reportCMName              = "rhaii-validate-report"
-	pingmeshFailuresCMName    = "rhaii-validate-pingmesh-failures"
-	defaultTimeout            = 5 * time.Minute
+	checkJobLabelKey       = "app"
+	gpuCheckJobLabelValue  = "rhaii-validate-gpu-check"
+	netCheckJobLabelValue  = "rhaii-validate-net-check"
+	configMapName          = "rhaii-validate-config"
+	reportCMName           = "rhaii-validate-report"
+	pingmeshFailuresCMName = "rhaii-validate-pingmesh-failures"
+	defaultTimeout         = 5 * time.Minute
 )
 
 // CheckMode constants define the validation modes used by both the CLI
@@ -71,20 +71,20 @@ type Options struct {
 
 // Controller orchestrates check job deployment, result collection, and cleanup.
 type Controller struct {
-	client       kubernetes.Interface
-	opts         Options
-	cfg          config.PlatformConfig
-	output       io.Writer
-	platform     config.Platform
-	gpuVendor    config.GPUVendor   // auto-detected from node labels
-	gpuNodeLabel string             // label used to discover GPU nodes (empty = fallback to resources)
-	gpuNodes     []string           // discovered GPU node names
-	gpuCounts    map[string]int64   // GPU count per node (from allocatable)
+	client         kubernetes.Interface
+	opts           Options
+	cfg            config.PlatformConfig
+	output         io.Writer
+	platform       config.Platform
+	gpuVendor      config.GPUVendor    // auto-detected from node labels
+	gpuNodeLabel   string              // label used to discover GPU nodes (empty = fallback to resources)
+	gpuNodes       []string            // discovered GPU node names
+	gpuCounts      map[string]int64    // GPU count per node (from allocatable)
 	gpuResource    corev1.ResourceName // e.g. "nvidia.com/gpu" or "amd.com/gpu"
-	jobs            []jobrunner.Job
-	clusterResults  []checks.Result        // Tier 1 (API) check results (CRDs, etc.)
-	pingmeshReport  *rdma.PingMeshReport   // populated by runPingMesh
-	reportStored    bool                   // true after storeReport succeeds
+	jobs           []jobrunner.Job
+	clusterResults []checks.Result      // Tier 1 (API) check results (CRDs, etc.)
+	pingmeshReport *rdma.PingMeshReport // populated by runPingMesh
+	reportStored   bool                 // true after storeReport succeeds
 }
 
 // AddJob registers a multi-node job to run when --bandwidth is enabled.
@@ -161,7 +161,7 @@ type jsonReport struct {
 	Timestamp     string                `json:"timestamp,omitempty"`
 	ClusterChecks []checks.Result       `json:"cluster_checks,omitempty"`
 	Nodes         []checks.NodeReport   `json:"nodes"`
-	JobResults    []jobrunner.JobResult  `json:"job_results,omitempty"`
+	JobResults    []jobrunner.JobResult `json:"job_results,omitempty"`
 	Pingmesh      *rdma.PingMeshReport  `json:"pingmesh,omitempty"`
 	Summary       map[string]int        `json:"summary"`
 	Status        string                `json:"status"`
@@ -533,7 +533,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to deploy GPU check jobs: %w", err)
 		}
 
-		fmt.Fprintln(c.output, "[Step 6] Waiting for GPU check Jobs to complete...")
+		fmt.Fprintln(c.output, "  Waiting for GPU check Jobs to complete...")
 		gpuReports, err = c.waitAndCollectGpuCheckJobs(ctx)
 		if err != nil {
 			fmt.Fprintf(c.output, "  Warning: GPU check collection error: %v\n", err)
@@ -553,7 +553,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to deploy RDMA node check jobs: %w", err)
 		}
 
-		fmt.Fprintln(c.output, "[Step 7] Waiting for RDMA node check Jobs to complete...")
+		fmt.Fprintln(c.output, "  Waiting for RDMA node check Jobs to complete...")
 		netReports, err = c.waitAndCollectNetCheckJobs(ctx)
 		if err != nil {
 			fmt.Fprintf(c.output, "  Warning: RDMA node check collection error: %v\n", err)
@@ -564,9 +564,10 @@ func (c *Controller) Run(ctx context.Context) error {
 		}
 	}
 
-	// Step 7b: Run pingmesh RDMA connectivity test
+	// Step 8: Run pingmesh RDMA connectivity test
 	needPingMesh := c.opts.CheckMode == CheckModeRDMA || c.opts.CheckMode == CheckModeRDMAPing || c.opts.CheckMode == CheckModeAll
 	if needPingMesh && len(gpuNodes) >= 2 {
+		fmt.Fprintln(c.output, "[Step 8] Running RDMA connectivity mesh (PingMesh)...")
 		pmNetReports := netReports
 		if !needNetChecks || len(pmNetReports) == 0 {
 			// rdma-node didn't run this session — load topology from stored report
@@ -586,7 +587,6 @@ func (c *Controller) Run(ctx context.Context) error {
 			c.pingmeshReport = skipPingMeshReport("Skipped: topology incomplete for all GPU nodes")
 		}
 		if len(pmNetReports) > 0 {
-			fmt.Fprintln(c.output, "[Step 7b] Running RDMA connectivity mesh (PingMesh)...")
 			if err := c.runPingMesh(ctx, gpuNodes, pmNetReports); err != nil {
 				fmt.Fprintf(c.output, "  Warning: pingmesh error: %v\n", err)
 			}
@@ -610,7 +610,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			}
 		}
 
-		fmt.Fprintln(c.output, "[Step 8] Running multi-node tests...")
+		fmt.Fprintln(c.output, "[Step 9] Running multi-node tests...")
 		jr, err := c.runBandwidthJobs(ctx, gpuNodes, netReports)
 		if err != nil {
 			fmt.Fprintf(c.output, "  Warning: bandwidth test error: %v\n", err)
@@ -846,8 +846,6 @@ var gpuResourceNames = []corev1.ResourceName{
 	"nvidia.com/gpu",
 	"amd.com/gpu",
 }
-
-
 
 func (c *Controller) ensureNamespace(ctx context.Context) error {
 	ns := &corev1.Namespace{
