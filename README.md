@@ -46,13 +46,16 @@ The tool will ensure the secret is linked to the `rhaii-validator` ServiceAccoun
 | Tools (iperf3, ib_write_bw, ibv_rc_pingpong) | `registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0`   |
 
 
-Run all validation checks:
+Set the image variables and run checks:
 
 ```bash
 IMG=registry.redhat.io/rhoai/odh-rhaii-cluster-validator-rhel9:v3.4.0
 TOOLS=registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0
+```
 
+Run all validation checks:
 
+```bash
 podman run --rm -it \
   -v ~/.kube/config:/kubeconfig:z \
   -e KUBECONFIG=/kubeconfig \
@@ -61,7 +64,35 @@ podman run --rm -it \
   $IMG all --pull-secret rhaii-pull-secret
 ```
 
-After running, to remove validation resources from the cluster run:
+Or run individual checks:
+
+```bash
+# GPU hardware checks (driver version, ECC errors)
+podman run --rm -it \
+  -v ~/.kube/config:/kubeconfig:z \
+  -e KUBECONFIG=/kubeconfig \
+  -e RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR=$IMG \
+  -e RELATED_IMAGE_RHAII_VALIDATOR_TOOLS=$TOOLS \
+  $IMG gpu --pull-secret rhaii-pull-secret
+
+# TCP bandwidth and latency tests (requires 2+ GPU nodes)
+podman run --rm -it \
+  -v ~/.kube/config:/kubeconfig:z \
+  -e KUBECONFIG=/kubeconfig \
+  -e RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR=$IMG \
+  -e RELATED_IMAGE_RHAII_VALIDATOR_TOOLS=$TOOLS \
+  $IMG network --pull-secret rhaii-pull-secret
+
+# RDMA checks (InfiniBand/RoCE clusters only)
+podman run --rm -it \
+  -v ~/.kube/config:/kubeconfig:z \
+  -e KUBECONFIG=/kubeconfig \
+  -e RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR=$IMG \
+  -e RELATED_IMAGE_RHAII_VALIDATOR_TOOLS=$TOOLS \
+  $IMG rdma --pull-secret rhaii-pull-secret
+```
+
+Remove validation resources from the cluster:
 
 ```bash
 podman run --rm -it \
