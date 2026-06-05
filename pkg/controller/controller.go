@@ -3,6 +3,8 @@ package controller
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +36,7 @@ const (
 	checkJobLabelKey       = "app"
 	gpuCheckJobLabelValue  = "rhaii-validate-gpu-check"
 	netCheckJobLabelValue  = "rhaii-validate-net-check"
+	bwProbeLabelValue      = "rhaii-validate-bw-probe"
 	configMapName          = "rhaii-validate-config"
 	reportCMName           = "rhaii-validate-report"
 	pingmeshFailuresCMName = "rhaii-validate-pingmesh-failures"
@@ -83,8 +86,9 @@ type Controller struct {
 	gpuResource    corev1.ResourceName // e.g. "nvidia.com/gpu" or "amd.com/gpu"
 	jobs           []jobrunner.Job
 	clusterResults []checks.Result      // Tier 1 (API) check results (CRDs, etc.)
-	pingmeshReport *rdma.PingMeshReport // populated by runPingMesh
-	reportStored   bool                 // true after storeReport succeeds
+	pingmeshReport        *rdma.PingMeshReport // populated by runPingMesh
+	reportStored          bool                 // true after storeReport succeeds
+	bwProbeMaxMatrixSize  int                  // largest GPU×NIC matrix across deployed BW probe jobs
 }
 
 // AddJob registers a multi-node job to run when --bandwidth is enabled.
@@ -316,10 +320,11 @@ func (c *Controller) printDebugHelp(ctx context.Context) {
 	fmt.Fprintln(c.output, "Jobs kept alive for debugging.")
 	fmt.Fprintln(c.output, "")
 
-	// List all validation jobs (GPU check + net check + bandwidth)
+	// List all validation jobs (GPU check + net check + BW probe + bandwidth)
 	for _, selector := range []string{
 		checkJobLabelKey + "=" + gpuCheckJobLabelValue,
 		checkJobLabelKey + "=" + netCheckJobLabelValue,
+		checkJobLabelKey + "=" + bwProbeLabelValue,
 		"app=rhaii-validate-job",
 	} {
 		jobs, err := c.client.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{
@@ -335,29 +340,23 @@ func (c *Controller) printDebugHelp(ctx context.Context) {
 		fmt.Fprintln(c.output)
 	}
 
-	// List pods from check jobs (GPU + RDMA node)
-	allCheckSelector := checkJobLabelKey + " in (" + gpuCheckJobLabelValue + "," + netCheckJobLabelValue + ")"
+	// List pods from check jobs (GPU + RDMA node + BW probe)
+	allCheckSelector := checkJobLabelKey + " in (" + gpuCheckJobLabelValue + "," + netCheckJobLabelValue + "," + bwProbeLabelValue + ")"
 	pods, err := c.client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
 		LabelSelector: allCheckSelector,
 	})
 	if err == nil && len(pods.Items) > 0 {
-		fmt.Fprintln(c.output, "Check pods:")
+		fmt.Fprintln(c.output, "Pods:")
 		for _, pod := range pods.Items {
 			fmt.Fprintf(c.output, "  %s (node: %s, status: %s)\n", pod.Name, pod.Spec.NodeName, pod.Status.Phase)
 		}
-		fmt.Fprintln(c.output, "")
-		fmt.Fprintln(c.output, "Exec into pod:")
+		fmt.Fprintln(c.output)
+		fmt.Fprintln(c.output, "View logs:")
 		for _, pod := range pods.Items {
-			fmt.Fprintf(c.output, "  kubectl exec -it -n %s %s -- bash\n", ns, pod.Name)
+			fmt.Fprintf(c.output, "  kubectl logs -n %s %s\n", ns, pod.Name)
 		}
 	}
 
-	fmt.Fprintln(c.output, "")
-	fmt.Fprintln(c.output, "Debug commands inside check pod:")
-	fmt.Fprintln(c.output, "  nvidia-smi")
-	fmt.Fprintln(c.output, "  chroot /host ibv_devices")
-	fmt.Fprintln(c.output, "  chroot /host ibstat")
-	fmt.Fprintln(c.output, "  ls /dev/nvidia*")
 	fmt.Fprintln(c.output, "")
 	fmt.Fprintf(c.output, "Cleanup: kubectl rhaii-validate clean\n")
 }
@@ -366,27 +365,6 @@ func (c *Controller) printDebugHelp(ctx context.Context) {
 func (c *Controller) Cleanup() error {
 	ctx := context.Background()
 	fmt.Fprintln(c.output, "Cleaning up all validation resources...")
-
-	propagation := metav1.DeletePropagationBackground
-	for _, selector := range []string{
-		checkJobLabelKey + "=" + gpuCheckJobLabelValue,
-		checkJobLabelKey + "=" + netCheckJobLabelValue,
-		"app=rhaii-validate-job",
-	} {
-		jobs, err := c.client.BatchV1().Jobs(c.opts.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: selector,
-		})
-		if err == nil {
-			for _, j := range jobs.Items {
-				_ = c.client.BatchV1().Jobs(c.opts.Namespace).Delete(ctx, j.Name, metav1.DeleteOptions{
-					PropagationPolicy: &propagation,
-				})
-			}
-			if len(jobs.Items) > 0 {
-				fmt.Fprintf(c.output, "  Deleted %d job(s) (%s)\n", len(jobs.Items), selector)
-			}
-		}
-	}
 
 	// Delete pingmesh failures ConfigMap (explicit clean removes everything)
 	if err := c.client.CoreV1().ConfigMaps(c.opts.Namespace).Delete(ctx, pingmeshFailuresCMName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
@@ -438,10 +416,11 @@ func (c *Controller) Run(ctx context.Context) error {
 	fmt.Fprintln(c.output, "=== RHAII Cluster Validation ===")
 	fmt.Fprintln(c.output)
 
-	// Step 1: Cleanup previous runs (GPU check + net check + bandwidth + pingmesh jobs)
+	// Step 1: Cleanup previous runs (GPU check + net check + BW probe + bandwidth + pingmesh jobs)
 	fmt.Fprintln(c.output, "[Step 1] Cleaning up previous runs...")
 	c.cleanupGpuCheckJobs(ctx)
 	c.cleanupNetCheckJobs(ctx)
+	c.cleanupLoopbackBWProbeJobs(ctx)
 	c.cleanupBandwidthJobs(ctx)
 	c.cleanupPingMeshJobs(ctx)
 
@@ -559,7 +538,44 @@ func (c *Controller) Run(ctx context.Context) error {
 			fmt.Fprintf(c.output, "  Warning: RDMA node check collection error: %v\n", err)
 		}
 
-		if !c.opts.Debug {
+		// Flat topology detected — net-check is incomplete without BW probe pairing.
+		// --debug keeps whichever pods are "final": net-check if flat=false, BW probe if flat=true.
+		if needsBandwidthProbe(netReports) {
+			if c.gpuVendor == config.GPUVendorAMD {
+				fmt.Fprintln(c.output, "  BW probe skipped: AMD GPUs not supported by tools image")
+				if !c.opts.Debug {
+					c.cleanupNetCheckJobs(ctx)
+				}
+			} else {
+				// All net-check reports are already collected in memory. Clean up
+				// net-check jobs cluster-wide to free GPU/RDMA device resources
+				// for the BW probe (which needs all GPUs on each flat node).
+				if !c.cleanupNetCheckJobs(ctx) {
+					fmt.Fprintln(c.output, "  Waiting for net-check pods to fully terminate...")
+					c.waitForPodsGone(checkJobLabelKey+"="+netCheckJobLabelValue, 60*time.Second)
+				}
+				fmt.Fprintln(c.output, "  Flat PCIe topology detected. Running GPU-NIC pairwise intra-host bandwidth tests...")
+				fmt.Fprintln(c.output, "  This may take ~10 minutes per node (testing all GPU-NIC combinations).")
+				if probeErr := c.deployLoopbackBWProbeJobs(ctx, netReports); probeErr != nil {
+					fmt.Fprintf(c.output, "  Warning: failed to deploy BW probe jobs: %v\n", probeErr)
+				} else if c.bwProbeMaxMatrixSize == 0 {
+					fmt.Fprintln(c.output, "  No BW probe jobs created (all flat nodes skipped)")
+				} else {
+					fmt.Fprintln(c.output, "  Waiting for loopback BW probe Jobs to complete...")
+					bwResults, probeErr := c.waitAndCollectLoopbackBWProbeJobs(ctx)
+					if probeErr != nil {
+						fmt.Fprintf(c.output, "  Warning: BW probe collection error: %v\n", probeErr)
+					}
+					if len(bwResults) > 0 {
+						netReports = c.applyBandwidthPairing(netReports, bwResults)
+					}
+					if !c.opts.Debug {
+						c.cleanupLoopbackBWProbeJobs(ctx)
+					}
+				}
+				netReports = warnUnpairedFlatNodes(netReports)
+			}
+		} else if !c.opts.Debug {
 			c.cleanupNetCheckJobs(ctx)
 		}
 	}
@@ -1107,6 +1123,388 @@ func (c *Controller) deployNetCheckJobs(ctx context.Context) error {
 		fmt.Fprintf(c.output, "  Created RDMA node check job %s (node: %s, GPUs: %d)\n", jobName, nodeName, gpuCount)
 	}
 	return nil
+}
+
+// deployLoopbackBWProbeJobs creates one Job per flat-topology node that runs
+// intra-host loopback ib_write_bw tests for every GPU-NIC combination.
+// All Jobs are created before returning so they run in parallel across nodes.
+func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports []checks.NodeReport) error {
+	topoMap := buildTopologyMap(netReports)
+
+	var maxMatrixSize int
+	for _, nodeName := range c.gpuNodes {
+		topo := topoMap[nodeName]
+		if topo == nil || topo.PairingStrategy != checks.PairingNUMAAffinity {
+			continue
+		}
+		if len(topo.GPUList) == 0 || len(topo.NICList) == 0 {
+			fmt.Fprintf(c.output, "  Skipping BW probe for %s: no GPUs or NICs in topology\n", nodeName)
+			continue
+		}
+
+		gpuIDs := make([]int, len(topo.GPUList))
+		for i, g := range topo.GPUList {
+			gpuIDs[i] = g.ID
+		}
+		nicDevs := make([]string, len(topo.NICList))
+		for i, n := range topo.NICList {
+			nicDevs[i] = n.Dev
+		}
+
+		matrixSize := len(gpuIDs) * len(nicDevs)
+		if matrixSize > maxMatrixSize {
+			maxMatrixSize = matrixSize
+		}
+
+		script, err := rdma.BuildLoopbackScript(gpuIDs, nicDevs,
+			rdma.DefaultLoopbackIters, rdma.DefaultLoopbackMsgSize, rdma.DefaultPerTestTimeoutSecs)
+		if err != nil {
+			return fmt.Errorf("failed to build BW probe script for node %s: %w", nodeName, err)
+		}
+
+		jobName := fmt.Sprintf("rhaii-validate-bwprobe-%s", sanitizeNodeName(nodeName))
+		if len(jobName) > 63 {
+			h := sha256.Sum256([]byte(jobName))
+			suffix := hex.EncodeToString(h[:3])
+			prefix := strings.TrimRight(jobName[:56], "-.")
+			jobName = prefix + "-" + suffix
+		}
+
+		// Per-test budget: server startup (2s) + test timeout (30s) + overhead (2s) = ~34s per pair.
+		// Total: matrixSize * 34s * 1.5 safety margin, with a 15-minute floor.
+		activeDeadlineSecs := int64(matrixSize) * 34 * 3 / 2
+		if activeDeadlineSecs < 900 {
+			activeDeadlineSecs = 900
+		}
+
+		backoffLimit := int32(0)
+		privileged := true
+		gracePeriod := int64(5)
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      jobName,
+				Namespace: c.opts.Namespace,
+				Labels: map[string]string{
+					checkJobLabelKey: bwProbeLabelValue,
+				},
+			},
+			Spec: batchv1.JobSpec{
+				BackoffLimit:          &backoffLimit,
+				ActiveDeadlineSeconds: &activeDeadlineSecs,
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							checkJobLabelKey: bwProbeLabelValue,
+						},
+					},
+					Spec: corev1.PodSpec{
+						RestartPolicy:                 corev1.RestartPolicyNever,
+						TerminationGracePeriodSeconds: &gracePeriod,
+						ServiceAccountName:            "rhaii-validator",
+						Tolerations: []corev1.Toleration{
+							{Operator: corev1.TolerationOpExists},
+						},
+						NodeSelector: map[string]string{
+							"kubernetes.io/hostname": nodeName,
+						},
+						Containers: []corev1.Container{{
+							Name:            "bw-probe",
+							Image:           c.opts.ToolsImage,
+							ImagePullPolicy: corev1.PullAlways,
+							Command:         []string{"/bin/bash", "-c", script},
+							SecurityContext: &corev1.SecurityContext{
+								Privileged: &privileged,
+							},
+						}},
+					},
+				},
+			},
+		}
+
+		container := &job.Spec.Template.Spec.Containers[0]
+		container.Resources.Requests = make(corev1.ResourceList)
+		container.Resources.Limits = make(corev1.ResourceList)
+
+		gpuCount := c.gpuCounts[nodeName]
+		if gpuCount > 0 && c.gpuResource != "" {
+			gpuQty := resource.MustParse(fmt.Sprintf("%d", gpuCount))
+			container.Resources.Requests[c.gpuResource] = gpuQty
+			container.Resources.Limits[c.gpuResource] = gpuQty
+		}
+
+		for k, v := range c.cfg.Jobs.Requests {
+			qty, err := resource.ParseQuantity(v)
+			if err != nil {
+				return fmt.Errorf("invalid jobs resource %q for %s: %w", v, k, err)
+			}
+			container.Resources.Requests[corev1.ResourceName(k)] = qty
+		}
+		for k, v := range c.cfg.Jobs.Limits {
+			qty, err := resource.ParseQuantity(v)
+			if err != nil {
+				return fmt.Errorf("invalid jobs limit %q for %s: %w", v, k, err)
+			}
+			container.Resources.Limits[corev1.ResourceName(k)] = qty
+		}
+
+		if len(c.cfg.Jobs.Annotations) > 0 {
+			job.Spec.Template.Annotations = make(map[string]string)
+			for k, v := range c.cfg.Jobs.Annotations {
+				job.Spec.Template.Annotations[k] = v
+			}
+		}
+
+		_, err = c.client.BatchV1().Jobs(c.opts.Namespace).Create(ctx, job, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create BW probe job for node %s: %w", nodeName, err)
+		}
+		fmt.Fprintf(c.output, "  Created BW probe job %s (node: %s, %d GPUs x %d NICs)\n",
+			jobName, nodeName, len(gpuIDs), len(nicDevs))
+	}
+
+	c.bwProbeMaxMatrixSize = maxMatrixSize
+	return nil
+}
+
+// waitAndCollectLoopbackBWProbeJobs polls until all BW probe Jobs complete,
+// then parses the JSON bandwidth matrix from each pod's logs.
+func (c *Controller) waitAndCollectLoopbackBWProbeJobs(ctx context.Context) (map[string]*rdma.LoopbackBWReport, error) {
+	selector := checkJobLabelKey + "=" + bwProbeLabelValue
+
+	// Adaptive timeout from matrix size: ~34s per pair with 1.5x safety margin, 15min floor.
+	probeTimeout := time.Duration(c.bwProbeMaxMatrixSize) * 34 * 3 / 2 * time.Second
+	if probeTimeout < 15*time.Minute {
+		probeTimeout = 15 * time.Minute
+	}
+	if c.opts.Timeout > probeTimeout {
+		probeTimeout = c.opts.Timeout
+	}
+	fmt.Fprintf(c.output, "  BW probe timeout: %v (matrix size: %d pairs)\n", probeTimeout.Round(time.Second), c.bwProbeMaxMatrixSize)
+
+	timeout := time.After(probeTimeout)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	jobs, err := c.client.BatchV1().Jobs(c.opts.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list BW probe jobs: %w", err)
+	}
+	expected := len(jobs.Items)
+	if expected == 0 {
+		return nil, nil
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return c.collectLoopbackBWResults(context.Background(), selector)
+		case <-timeout:
+			fmt.Fprintf(c.output, "  Warning: BW probe timed out after %v, collecting available results\n", probeTimeout)
+			return c.collectLoopbackBWResults(ctx, selector)
+		case <-ticker.C:
+			jobs, err := c.client.BatchV1().Jobs(c.opts.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: selector,
+			})
+			if err != nil {
+				fmt.Fprintf(c.output, "  Warning: failed to poll BW probe jobs: %v\n", err)
+				continue
+			}
+			completed := 0
+			for _, j := range jobs.Items {
+				if j.Status.Succeeded > 0 || j.Status.Failed > 0 {
+					completed++
+				}
+			}
+			if completed >= expected {
+				return c.collectLoopbackBWResults(ctx, selector)
+			}
+		}
+	}
+}
+
+// collectLoopbackBWResults gathers and parses JSON output from BW probe pod logs.
+func (c *Controller) collectLoopbackBWResults(ctx context.Context, selector string) (map[string]*rdma.LoopbackBWReport, error) {
+	jobs, err := c.client.BatchV1().Jobs(c.opts.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list BW probe jobs: %w", err)
+	}
+
+	results := make(map[string]*rdma.LoopbackBWReport)
+	for _, job := range jobs.Items {
+		nodeName := job.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]
+		if nodeName == "" {
+			continue
+		}
+
+		pods, err := c.client.CoreV1().Pods(c.opts.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: "job-name=" + job.Name,
+		})
+		if err != nil || len(pods.Items) == 0 {
+			fmt.Fprintf(c.output, "  Warning: no pod found for BW probe job %s\n", job.Name)
+			continue
+		}
+
+		stream, err := c.client.CoreV1().Pods(c.opts.Namespace).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{}).Stream(ctx)
+		if err != nil {
+			fmt.Fprintf(c.output, "  Warning: failed to get logs from BW probe pod %s: %v\n", pods.Items[0].Name, err)
+			continue
+		}
+
+		var sb strings.Builder
+		buf := make([]byte, 32*1024)
+		for {
+			n, readErr := stream.Read(buf)
+			if n > 0 {
+				sb.Write(buf[:n])
+			}
+			if readErr != nil {
+				break
+			}
+		}
+		stream.Close()
+
+		entries, err := rdma.ParseLoopbackBWOutput(sb.String())
+		if err != nil {
+			fmt.Fprintf(c.output, "  Warning: failed to parse BW probe output for %s: %v\n", nodeName, err)
+			continue
+		}
+
+		results[nodeName] = &rdma.LoopbackBWReport{
+			Node:    nodeName,
+			Results: entries,
+		}
+
+		succeeded := 0
+		failed := 0
+		for _, e := range entries {
+			if e.Error != "" {
+				failed++
+			} else {
+				succeeded++
+			}
+		}
+		total := succeeded + failed
+		fmt.Fprintf(c.output, "  BW probe %s: %d/%d measurements succeeded, %d failed\n", nodeName, succeeded, total, failed)
+	}
+	return results, nil
+}
+
+// needsBandwidthProbe returns true if any node used NUMA-affinity pairing,
+// meaning PCIe-based pairing was not possible (flat topology or missing PCIe paths).
+func needsBandwidthProbe(reports []checks.NodeReport) bool {
+	for _, r := range reports {
+		if topo := checks.ExtractTopology(r); topo != nil && topo.PairingStrategy == checks.PairingNUMAAffinity {
+			return true
+		}
+	}
+	return false
+}
+
+// warnUnpairedFlatNodes marks the topology check as WARN on flat-topology nodes
+// that still use NUMA-affinity pairing after the BW probe phase. This indicates
+// the BW probe either failed or was skipped for that node.
+func warnUnpairedFlatNodes(reports []checks.NodeReport) []checks.NodeReport {
+	for i, r := range reports {
+		topo := checks.ExtractTopology(r)
+		if topo == nil || !topo.IsFlat || topo.PairingStrategy != checks.PairingNUMAAffinity {
+			continue
+		}
+		for j, res := range reports[i].Results {
+			if res.Name == "gpu_nic_topology" && res.Status == checks.StatusPass {
+				reports[i].Results[j].Status = checks.StatusWarn
+				reports[i].Results[j].Message += " (BW probe unavailable; using NUMA-affinity fallback)"
+				break
+			}
+		}
+	}
+	return reports
+}
+
+// applyBandwidthPairing replaces NUMA-affinity pairs with bandwidth-optimal
+// pairs for nodes that have loopback BW probe results.
+func (c *Controller) applyBandwidthPairing(netReports []checks.NodeReport, bwResults map[string]*rdma.LoopbackBWReport) []checks.NodeReport {
+	for i, report := range netReports {
+		bwReport, ok := bwResults[report.Node]
+		if !ok {
+			continue
+		}
+
+		topo := checks.ExtractTopology(report)
+		if topo == nil || topo.PairingStrategy != checks.PairingNUMAAffinity {
+			continue
+		}
+
+		newPairs := rdma.BandwidthOptimalPairing(bwReport.Results, topo.GPUList, topo.NICList)
+		if len(newPairs) == 0 {
+			fmt.Fprintf(c.output, "  Warning: BW probe pairing produced no pairs for %s, keeping NUMA-affinity pairing\n", report.Node)
+			continue
+		}
+
+		// Attach measured bandwidth to each selected pair
+		bwLookup := make(map[[2]string]float64)
+		for _, e := range bwReport.Results {
+			key := [2]string{fmt.Sprintf("%d", e.GPUId), e.NICDev}
+			bwLookup[key] = e.BWGbps
+		}
+		for j := range newPairs {
+			key := [2]string{fmt.Sprintf("%d", newPairs[j].GPU.ID), newPairs[j].NIC.Dev}
+			newPairs[j].IntrahostBWGbps = bwLookup[key]
+		}
+
+		topo.Pairs = newPairs
+		topo.PairingStrategy = checks.PairingBandwidthProbe
+		topo.GPUNICPCIeMapping = rdma.BuildGPUNICPCIeMapping(newPairs)
+
+		// Update the topology result: Details and Message
+		var pairDescs []string
+		for _, p := range newPairs {
+			pairDescs = append(pairDescs, fmt.Sprintf("GPU%d↔%s(NUMA:%d↔%d)", p.GPU.ID, p.NIC.Dev, p.GPU.NUMA, p.NIC.NUMA))
+		}
+		updatedMsg := fmt.Sprintf("%d GPU(s), %d NIC(s), strategy=%s: %s",
+			len(topo.GPUList), len(topo.NICList), topo.PairingStrategy, strings.Join(pairDescs, ", "))
+		for j, res := range netReports[i].Results {
+			if res.Name == "gpu_nic_topology" {
+				netReports[i].Results[j].Details = topo
+				netReports[i].Results[j].Message = updatedMsg
+				break
+			}
+		}
+
+		fmt.Fprintf(c.output, "  Updated %s pairing via bandwidth probe:\n", report.Node)
+		for _, p := range newPairs {
+			fmt.Fprintf(c.output, "    GPU%d ↔ %s (%.1f Gbps)\n", p.GPU.ID, p.NIC.Dev, p.IntrahostBWGbps)
+		}
+	}
+	return netReports
+}
+
+// cleanupLoopbackBWProbeJobs deletes all BW probe jobs and waits for removal.
+func (c *Controller) cleanupLoopbackBWProbeJobs(ctx context.Context) bool {
+	return c.deleteJobsBySelector(ctx, checkJobLabelKey+"="+bwProbeLabelValue)
+}
+
+// waitForPodsGone polls until no pods match the label selector, up to timeout.
+func (c *Controller) waitForPodsGone(selector string, timeout time.Duration) {
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			return
+		case <-ticker.C:
+			pods, err := c.client.CoreV1().Pods(c.opts.Namespace).List(context.Background(), metav1.ListOptions{
+				LabelSelector: selector,
+			})
+			if err != nil || len(pods.Items) == 0 {
+				return
+			}
+		}
+	}
 }
 
 // sanitizeNodeName converts a node name to a valid Kubernetes name suffix.
@@ -2090,74 +2488,84 @@ func (c *Controller) ensureOpenShiftSCC(ctx context.Context) error {
 }
 
 // cleanupGpuCheckJobs deletes all GPU check jobs and waits for them to be fully removed.
-func (c *Controller) cleanupGpuCheckJobs(ctx context.Context) {
-	c.deleteJobsBySelector(ctx, checkJobLabelKey+"="+gpuCheckJobLabelValue)
+func (c *Controller) cleanupGpuCheckJobs(ctx context.Context) bool {
+	return c.deleteJobsBySelector(ctx, checkJobLabelKey+"="+gpuCheckJobLabelValue)
 }
 
 // cleanupNetCheckJobs deletes all RDMA node check jobs and waits for them to be fully removed.
-func (c *Controller) cleanupNetCheckJobs(ctx context.Context) {
-	c.deleteJobsBySelector(ctx, checkJobLabelKey+"="+netCheckJobLabelValue)
+func (c *Controller) cleanupNetCheckJobs(ctx context.Context) bool {
+	return c.deleteJobsBySelector(ctx, checkJobLabelKey+"="+netCheckJobLabelValue)
 }
 
 // cleanupBandwidthJobs deletes all bandwidth jobs and waits for them to be fully removed.
-func (c *Controller) cleanupBandwidthJobs(ctx context.Context) {
-	c.deleteJobsBySelector(ctx, "app=rhaii-validate-job")
+func (c *Controller) cleanupBandwidthJobs(ctx context.Context) bool {
+	return c.deleteJobsBySelector(ctx, "app=rhaii-validate-job")
 }
 
 // cleanupPingMeshJobs deletes pingmesh jobs only. The failures ConfigMap is
 // managed by runPingMesh: updated on failure, deleted on full success.
-func (c *Controller) cleanupPingMeshJobs(ctx context.Context) {
-	c.deleteJobsBySelector(ctx, "rhaii-job-type=pingmesh")
+func (c *Controller) cleanupPingMeshJobs(ctx context.Context) bool {
+	return c.deleteJobsBySelector(ctx, "rhaii-job-type=pingmesh")
 }
 
-// deleteJobsBySelector deletes jobs matching a label selector and waits for removal.
-func (c *Controller) deleteJobsBySelector(ctx context.Context, selector string) {
-	propagation := metav1.DeletePropagationForeground
-	jobs, err := c.client.BatchV1().Jobs(c.opts.Namespace).List(ctx, metav1.ListOptions{
+// deleteJobsBySelector deletes jobs matching a label selector and waits for pod termination.
+// Uses context.Background() so cleanup completes even after signal interruption.
+// Uses Background propagation (non-blocking Job GC) and polls for pod termination
+// which is the real gate for freeing GPU/RDMA device resources.
+// Returns true if all pods terminated within the timeout, false if some remain.
+func (c *Controller) deleteJobsBySelector(_ context.Context, selector string) bool {
+	bgCtx := context.Background()
+	propagation := metav1.DeletePropagationBackground
+	jobs, err := c.client.BatchV1().Jobs(c.opts.Namespace).List(bgCtx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
 	if err != nil || len(jobs.Items) == 0 {
-		return
+		return true
 	}
 
 	for _, j := range jobs.Items {
-		_ = c.client.BatchV1().Jobs(c.opts.Namespace).Delete(ctx, j.Name, metav1.DeleteOptions{
+		_ = c.client.BatchV1().Jobs(c.opts.Namespace).Delete(bgCtx, j.Name, metav1.DeleteOptions{
 			PropagationPolicy: &propagation,
 		})
 	}
 	fmt.Fprintf(c.output, "  Deleting %d leftover job(s) (%s)...\n", len(jobs.Items), selector)
 
 	for i := 0; i < 30; i++ {
-		remaining, err := c.client.BatchV1().Jobs(c.opts.Namespace).List(ctx, metav1.ListOptions{
+		pods, err := c.client.CoreV1().Pods(c.opts.Namespace).List(bgCtx, metav1.ListOptions{
 			LabelSelector: selector,
 		})
-		if err != nil || len(remaining.Items) == 0 {
-			return
+		if err != nil || len(pods.Items) == 0 {
+			return true
 		}
 		time.Sleep(1 * time.Second)
 	}
+	fmt.Fprintf(c.output, "  Warning: some pods still terminating for %s\n", selector)
+	return false
 }
 
 // cleanupAll removes check jobs, bandwidth jobs, and RBAC resources.
 // ConfigMap is preserved so users can edit and rerun without losing customizations.
+// Uses context.Background() (via deleteJobsBySelector) so cleanup completes after ^C.
 func (c *Controller) cleanupAll(ctx context.Context) error {
 	c.cleanupGpuCheckJobs(ctx)
 	c.cleanupNetCheckJobs(ctx)
+	c.cleanupLoopbackBWProbeJobs(ctx)
 	c.cleanupBandwidthJobs(ctx)
 	c.cleanupPingMeshJobs(ctx)
 
+	bgCtx := context.Background()
 	for _, del := range []func() error{
 		func() error {
-			return c.client.CoreV1().ServiceAccounts(c.opts.Namespace).Delete(ctx, "rhaii-validator", metav1.DeleteOptions{})
+			return c.client.CoreV1().ServiceAccounts(c.opts.Namespace).Delete(bgCtx, "rhaii-validator", metav1.DeleteOptions{})
 		},
 		func() error {
-			return c.client.RbacV1().ClusterRoleBindings().Delete(ctx, "rhaii-validator", metav1.DeleteOptions{})
+			return c.client.RbacV1().ClusterRoleBindings().Delete(bgCtx, "rhaii-validator", metav1.DeleteOptions{})
 		},
 		func() error {
-			return c.client.RbacV1().ClusterRoleBindings().Delete(ctx, "rhaii-validator-scc", metav1.DeleteOptions{})
+			return c.client.RbacV1().ClusterRoleBindings().Delete(bgCtx, "rhaii-validator-scc", metav1.DeleteOptions{})
 		},
 		func() error {
-			return c.client.RbacV1().ClusterRoles().Delete(ctx, "rhaii-validator", metav1.DeleteOptions{})
+			return c.client.RbacV1().ClusterRoles().Delete(bgCtx, "rhaii-validator", metav1.DeleteOptions{})
 		},
 	} {
 		if err := del(); err != nil && !apierrors.IsNotFound(err) {

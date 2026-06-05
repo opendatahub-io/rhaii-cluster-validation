@@ -121,8 +121,20 @@ deploy: install
 deploy-all: build container push deploy
 
 logs:
-	@echo "=== Check Job Results ==="
-	@for pod in $$(kubectl get pods -n $(NAMESPACE) -l app=rhaii-validate-check -o jsonpath='{.items[*].metadata.name}'); do \
+	@echo "=== GPU Check Job Results ==="
+	@for pod in $$(kubectl get pods -n $(NAMESPACE) -l app=rhaii-validate-gpu-check -o jsonpath='{.items[*].metadata.name}'); do \
+		echo "--- $$pod ---"; \
+		kubectl logs -n $(NAMESPACE) $$pod 2>/dev/null; \
+		echo ""; \
+	done
+	@echo "=== RDMA Node Check Job Results ==="
+	@for pod in $$(kubectl get pods -n $(NAMESPACE) -l app=rhaii-validate-net-check -o jsonpath='{.items[*].metadata.name}'); do \
+		echo "--- $$pod ---"; \
+		kubectl logs -n $(NAMESPACE) $$pod 2>/dev/null; \
+		echo ""; \
+	done
+	@echo "=== BW Probe Job Results ==="
+	@for pod in $$(kubectl get pods -n $(NAMESPACE) -l app=rhaii-validate-bw-probe -o jsonpath='{.items[*].metadata.name}'); do \
 		echo "--- $$pod ---"; \
 		kubectl logs -n $(NAMESPACE) $$pod 2>/dev/null; \
 		echo ""; \
@@ -130,12 +142,16 @@ logs:
 
 clean:
 	@echo "Cleaning up validation resources (preserving ConfigMap)..."
-	-kubectl delete jobs -n $(NAMESPACE) -l app=rhaii-validate-check --ignore-not-found
+	-kubectl delete jobs -n $(NAMESPACE) -l app=rhaii-validate-gpu-check --ignore-not-found
+	-kubectl delete jobs -n $(NAMESPACE) -l app=rhaii-validate-net-check --ignore-not-found
+	-kubectl delete jobs -n $(NAMESPACE) -l app=rhaii-validate-bw-probe --ignore-not-found
 	-kubectl delete jobs -n $(NAMESPACE) -l app=rhaii-validate-job --ignore-not-found
+	-kubectl delete jobs -n $(NAMESPACE) -l rhaii-job-type=pingmesh --ignore-not-found
 	-kubectl delete serviceaccount rhaii-validator -n $(NAMESPACE) --ignore-not-found
 	-kubectl delete clusterrolebinding rhaii-validator --ignore-not-found
+	-kubectl delete clusterrolebinding rhaii-validator-scc --ignore-not-found
 	-kubectl delete clusterrole rhaii-validator --ignore-not-found
-	@echo "ConfigMap preserved: kubectl get cm rhaii-validate-config -n $(NAMESPACE)"
+	@echo "ConfigMaps preserved: rhaii-validate-config (user config), rhaii-validate-report (results)"
 
 clean-all: clean
 	@echo "Removing ConfigMap and namespace..."
