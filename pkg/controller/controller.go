@@ -1369,19 +1369,11 @@ func (c *Controller) collectLoopbackBWResults(ctx context.Context, selector stri
 			fmt.Fprintf(c.output, "  Warning: failed to get logs from BW probe pod %s: %v\n", pods.Items[0].Name, err)
 			continue
 		}
+		defer stream.Close()
 
+		const maxPodLogBytes = 10 << 20 // 10 MiB
 		var sb strings.Builder
-		buf := make([]byte, 32*1024)
-		for {
-			n, readErr := stream.Read(buf)
-			if n > 0 {
-				sb.Write(buf[:n])
-			}
-			if readErr != nil {
-				break
-			}
-		}
-		stream.Close()
+		io.Copy(&sb, io.LimitReader(stream, maxPodLogBytes))
 
 		entries, err := rdma.ParseLoopbackBWOutput(sb.String())
 		if err != nil {

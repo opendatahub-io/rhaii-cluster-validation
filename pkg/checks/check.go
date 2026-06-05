@@ -138,6 +138,9 @@ func (p *GPUNICPair) UnmarshalJSON(data []byte) error {
 	p.GPU = GPUInfo{ID: slim.GPUID, NUMA: slim.GPUNUMA}
 	p.NIC = NICInfo{Dev: slim.NICDev, NUMA: slim.NICNUMA}
 	p.PCIeHops = slim.PCIeHops
+	if slim.IntrahostBWGbps < 0 {
+		return fmt.Errorf("invalid GPUNICPair: negative intrahost_bandwidth_gbps %f", slim.IntrahostBWGbps)
+	}
 	p.IntrahostBWGbps = slim.IntrahostBWGbps
 	return nil
 }

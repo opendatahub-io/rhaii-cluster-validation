@@ -75,13 +75,13 @@ func BuildLoopbackScript(gpuIDs []int, nicDevs []string, iters, msgSize, perTest
 
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\n")
-	sb.WriteString(fmt.Sprintf("GPU_IDS='%s'\n", strings.Join(gpuStrs, ",")))
-	sb.WriteString(fmt.Sprintf("NIC_DEVS='%s'\n", strings.Join(nicDevs, ",")))
-	sb.WriteString(fmt.Sprintf("iters=%d\n", iters))
-	sb.WriteString(fmt.Sprintf("msg_size=%d\n", msgSize))
-	sb.WriteString(fmt.Sprintf("num_qps=%d\n", qps))
-	sb.WriteString(fmt.Sprintf("per_test_timeout=%d\n", perTestTimeout))
-	sb.WriteString(fmt.Sprintf("base_port=%d\n", DefaultLoopbackBasePort))
+	fmt.Fprintf(&sb, "GPU_IDS='%s'\n", strings.Join(gpuStrs, ","))
+	fmt.Fprintf(&sb, "NIC_DEVS='%s'\n", strings.Join(nicDevs, ","))
+	fmt.Fprintf(&sb, "iters=%d\n", iters)
+	fmt.Fprintf(&sb, "msg_size=%d\n", msgSize)
+	fmt.Fprintf(&sb, "num_qps=%d\n", qps)
+	fmt.Fprintf(&sb, "per_test_timeout=%d\n", perTestTimeout)
+	fmt.Fprintf(&sb, "base_port=%d\n", DefaultLoopbackBasePort)
 	sb.WriteString(`
 IFS=',' read -ra GPUS <<< "$GPU_IDS"
 IFS=',' read -ra NICS <<< "$NIC_DEVS"
