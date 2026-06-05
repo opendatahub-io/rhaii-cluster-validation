@@ -198,10 +198,13 @@ func BandwidthOptimalPairing(bwEntries []LoopbackBWEntry, gpus []checks.GPUInfo,
 		limit = len(nics)
 	}
 
-	// Build BW lookup keyed by (gpu_id, nic_dev) for setting IntrahostBWGbps on pairs.
-	bwLookup := make(map[[2]interface{}]float64, len(bwEntries))
+	type gpuNICKey struct {
+		gpuID  int
+		nicDev string
+	}
+	bwLookup := make(map[gpuNICKey]float64, len(bwEntries))
 	for _, e := range bwEntries {
-		bwLookup[[2]interface{}{e.GPUId, e.NICDev}] = e.BWGbps
+		bwLookup[gpuNICKey{e.GPUId, e.NICDev}] = e.BWGbps
 	}
 
 	// Phase 1: greedy 1:1 assignment
@@ -263,7 +266,7 @@ func BandwidthOptimalPairing(bwEntries []LoopbackBWEntry, gpus []checks.GPUInfo,
 					IntrahostBWGbps: best.BWGbps,
 				})
 			} else {
-				bw := bwLookup[[2]interface{}{g.ID, pairedNICs[rrIdx%len(pairedNICs)].Dev}]
+				bw := bwLookup[gpuNICKey{g.ID, pairedNICs[rrIdx%len(pairedNICs)].Dev}]
 				pairs = append(pairs, checks.GPUNICPair{
 					GPU:             g,
 					NIC:             pairedNICs[rrIdx%len(pairedNICs)],
