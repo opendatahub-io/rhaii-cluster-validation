@@ -37,7 +37,15 @@ const (
 	gpuCheckJobLabelValue  = "rhaii-validate-gpu-check"
 	netCheckJobLabelValue  = "rhaii-validate-net-check"
 	bwProbeLabelValue      = "rhaii-validate-bw-probe"
-	configMapName          = "rhaii-validate-config"
+	configMapName = "rhaii-validate-config"
+
+	// BW probe per-test time budget components (seconds).
+	// Each GPU-NIC pair runs: server startup + ib_write_bw test + teardown overhead.
+	bwProbeServerStartupSecs = 2
+	bwProbePerTestSecs       = 30 // matches DefaultPerTestTimeoutSecs
+	bwProbeOverheadSecs      = 2
+	bwProbePerPairBudgetSecs = bwProbeServerStartupSecs + bwProbePerTestSecs + bwProbeOverheadSecs // ~34s
+	bwProbeMinTimeoutSecs    = 900                                                                // 15-minute floor
 	reportCMName           = "rhaii-validate-report"
 	pingmeshFailuresCMName = "rhaii-validate-pingmesh-failures"
 	defaultTimeout         = 5 * time.Minute
@@ -573,8 +581,10 @@ func (c *Controller) Run(ctx context.Context) error {
 						c.cleanupLoopbackBWProbeJobs(ctx)
 					}
 				}
-				netReports = warnUnpairedFlatNodes(netReports)
 			}
+			// Mark flat nodes that still have NUMA-affinity pairing as WARN.
+			// This covers BW probe failures (NVIDIA) and unsupported vendors (AMD).
+			netReports = warnUnpairedFlatNodes(netReports)
 		} else if !c.opts.Debug {
 			c.cleanupNetCheckJobs(ctx)
 		}
@@ -1156,8 +1166,17 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 			maxMatrixSize = matrixSize
 		}
 
+		// Use platform config overrides if set, otherwise defaults
+		qps := rdma.DefaultLoopbackQPs
+		if c.cfg.Jobs.RDMA.QPs > 0 {
+			qps = c.cfg.Jobs.RDMA.QPs
+		}
+		msgSize := rdma.DefaultLoopbackMsgSize
+		if c.cfg.Jobs.RDMA.MessageSize > 0 {
+			msgSize = c.cfg.Jobs.RDMA.MessageSize
+		}
 		script, err := rdma.BuildLoopbackScript(gpuIDs, nicDevs,
-			rdma.DefaultLoopbackIters, rdma.DefaultLoopbackMsgSize, rdma.DefaultPerTestTimeoutSecs)
+			rdma.DefaultLoopbackIters, msgSize, rdma.DefaultPerTestTimeoutSecs, qps)
 		if err != nil {
 			return fmt.Errorf("failed to build BW probe script for node %s: %w", nodeName, err)
 		}
@@ -1170,11 +1189,9 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 			jobName = prefix + "-" + suffix
 		}
 
-		// Per-test budget: server startup (2s) + test timeout (30s) + overhead (2s) = ~34s per pair.
-		// Total: matrixSize * 34s * 1.5 safety margin, with a 15-minute floor.
-		activeDeadlineSecs := int64(matrixSize) * 34 * 3 / 2
-		if activeDeadlineSecs < 900 {
-			activeDeadlineSecs = 900
+		activeDeadlineSecs := int64(matrixSize) * bwProbePerPairBudgetSecs
+		if activeDeadlineSecs < bwProbeMinTimeoutSecs {
+			activeDeadlineSecs = bwProbeMinTimeoutSecs
 		}
 
 		backoffLimit := int32(0)
@@ -1271,10 +1288,9 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 func (c *Controller) waitAndCollectLoopbackBWProbeJobs(ctx context.Context) (map[string]*rdma.LoopbackBWReport, error) {
 	selector := checkJobLabelKey + "=" + bwProbeLabelValue
 
-	// Adaptive timeout from matrix size: ~34s per pair with 1.5x safety margin, 15min floor.
-	probeTimeout := time.Duration(c.bwProbeMaxMatrixSize) * 34 * 3 / 2 * time.Second
-	if probeTimeout < 15*time.Minute {
-		probeTimeout = 15 * time.Minute
+	probeTimeout := time.Duration(c.bwProbeMaxMatrixSize) * bwProbePerPairBudgetSecs * time.Second
+	if probeTimeout < bwProbeMinTimeoutSecs*time.Second {
+		probeTimeout = bwProbeMinTimeoutSecs * time.Second
 	}
 	if c.opts.Timeout > probeTimeout {
 		probeTimeout = c.opts.Timeout
@@ -1442,17 +1458,6 @@ func (c *Controller) applyBandwidthPairing(netReports []checks.NodeReport, bwRes
 		if len(newPairs) == 0 {
 			fmt.Fprintf(c.output, "  Warning: BW probe pairing produced no pairs for %s, keeping NUMA-affinity pairing\n", report.Node)
 			continue
-		}
-
-		// Attach measured bandwidth to each selected pair
-		bwLookup := make(map[[2]string]float64)
-		for _, e := range bwReport.Results {
-			key := [2]string{fmt.Sprintf("%d", e.GPUId), e.NICDev}
-			bwLookup[key] = e.BWGbps
-		}
-		for j := range newPairs {
-			key := [2]string{fmt.Sprintf("%d", newPairs[j].GPU.ID), newPairs[j].NIC.Dev}
-			newPairs[j].IntrahostBWGbps = bwLookup[key]
 		}
 
 		topo.Pairs = newPairs
@@ -2524,9 +2529,11 @@ func (c *Controller) deleteJobsBySelector(_ context.Context, selector string) bo
 	}
 
 	for _, j := range jobs.Items {
-		_ = c.client.BatchV1().Jobs(c.opts.Namespace).Delete(bgCtx, j.Name, metav1.DeleteOptions{
+		if delErr := c.client.BatchV1().Jobs(c.opts.Namespace).Delete(bgCtx, j.Name, metav1.DeleteOptions{
 			PropagationPolicy: &propagation,
-		})
+		}); delErr != nil && !apierrors.IsNotFound(delErr) {
+			fmt.Fprintf(c.output, "  Warning: failed to delete job %s: %v\n", j.Name, delErr)
+		}
 	}
 	fmt.Fprintf(c.output, "  Deleting %d leftover job(s) (%s)...\n", len(jobs.Items), selector)
 

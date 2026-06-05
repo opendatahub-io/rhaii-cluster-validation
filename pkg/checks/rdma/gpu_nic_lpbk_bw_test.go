@@ -9,7 +9,7 @@ import (
 )
 
 func TestBuildLoopbackScript(t *testing.T) {
-	script, err := BuildLoopbackScript([]int{0, 1}, []string{"mlx5_0", "mlx5_1"}, 5000, 1048576, 30)
+	script, err := BuildLoopbackScript([]int{0, 1}, []string{"mlx5_0", "mlx5_1"}, 5000, 1048576, 30, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestBuildLoopbackScript(t *testing.T) {
 }
 
 func TestBuildLoopbackScriptDefaults(t *testing.T) {
-	script, err := BuildLoopbackScript([]int{0}, []string{"mlx5_0"}, 0, 0, 0)
+	script, err := BuildLoopbackScript([]int{0}, []string{"mlx5_0"}, 0, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,37 +67,50 @@ func TestBuildLoopbackScriptDefaults(t *testing.T) {
 	if !strings.Contains(script, "per_test_timeout=30") {
 		t.Error("expected default per_test_timeout")
 	}
+	if !strings.Contains(script, "num_qps=4") {
+		t.Error("expected default num_qps=4")
+	}
+}
+
+func TestBuildLoopbackScriptCustomQPs(t *testing.T) {
+	script, err := BuildLoopbackScript([]int{0}, []string{"mlx5_0"}, 0, 0, 0, 8)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(script, "num_qps=8") {
+		t.Error("expected num_qps=8 for custom QPs override")
+	}
 }
 
 func TestBuildLoopbackScriptInvalidNICName(t *testing.T) {
-	_, err := BuildLoopbackScript([]int{0}, []string{"-flag"}, 0, 0, 0)
+	_, err := BuildLoopbackScript([]int{0}, []string{"-flag"}, 0, 0, 0, 0)
 	if err == nil {
 		t.Error("expected error for invalid NIC name '-flag'")
 	}
 
-	_, err = BuildLoopbackScript([]int{0}, []string{"mlx5_0; rm -rf /"}, 0, 0, 0)
+	_, err = BuildLoopbackScript([]int{0}, []string{"mlx5_0; rm -rf /"}, 0, 0, 0, 0)
 	if err == nil {
 		t.Error("expected error for NIC name with shell metacharacters")
 	}
 
-	_, err = BuildLoopbackScript([]int{0}, []string{"mlx5_0"}, 0, 0, 0)
+	_, err = BuildLoopbackScript([]int{0}, []string{"mlx5_0"}, 0, 0, 0, 0)
 	if err != nil {
 		t.Errorf("unexpected error for valid NIC name: %v", err)
 	}
 }
 
 func TestBuildLoopbackScriptEmptyInputs(t *testing.T) {
-	_, err := BuildLoopbackScript([]int{}, []string{"mlx5_0"}, 0, 0, 0)
+	_, err := BuildLoopbackScript([]int{}, []string{"mlx5_0"}, 0, 0, 0, 0)
 	if err == nil {
 		t.Error("expected error for empty GPU IDs")
 	}
 
-	_, err = BuildLoopbackScript([]int{0}, []string{}, 0, 0, 0)
+	_, err = BuildLoopbackScript([]int{0}, []string{}, 0, 0, 0, 0)
 	if err == nil {
 		t.Error("expected error for empty NIC devices")
 	}
 
-	_, err = BuildLoopbackScript(nil, nil, 0, 0, 0)
+	_, err = BuildLoopbackScript(nil, nil, 0, 0, 0, 0)
 	if err == nil {
 		t.Error("expected error for nil inputs")
 	}
@@ -297,6 +310,18 @@ func TestBandwidthOptimalPairing_Phase2PicksHighestBW(t *testing.T) {
 	// GPU2 (leftover) should pick mlx5_0 (200 Gbps > 150 for mlx5_1)
 	if pairs[2].GPU.ID != 2 || pairs[2].NIC.Dev != "mlx5_0" {
 		t.Errorf("GPU2: expected mlx5_0 (highest BW), got %s", pairs[2].NIC.Dev)
+	}
+
+	// Phase 1 pairs should have bandwidth set from the matched entry
+	if pairs[0].IntrahostBWGbps != 427 {
+		t.Errorf("GPU0 BW = %f, want 427 (Phase 1)", pairs[0].IntrahostBWGbps)
+	}
+	if pairs[1].IntrahostBWGbps != 300 {
+		t.Errorf("GPU1 BW = %f, want 300 (Phase 1)", pairs[1].IntrahostBWGbps)
+	}
+	// Phase 2 pair should have bandwidth set from GPU2↔mlx5_0 entry
+	if pairs[2].IntrahostBWGbps != 200 {
+		t.Errorf("GPU2 BW = %f, want 200 (Phase 2)", pairs[2].IntrahostBWGbps)
 	}
 }
 

@@ -14,7 +14,10 @@ const (
 	DefaultLoopbackMsgSize    = 1048576 // 1 MiB
 	DefaultLoopbackQPs        = 4       // Queue pairs needed to saturate 400 Gbps NICs
 	DefaultPerTestTimeoutSecs = 30
-	DefaultLoopbackBasePort   = 20000
+	// Base port for ib_write_bw loopback server. Each GPU-NIC pair increments
+	// from this base (e.g., 8×8 matrix uses ports 20000–20063). Port collisions
+	// across nodes are not possible because loopback tests bind to localhost only.
+	DefaultLoopbackBasePort = 20000
 )
 
 // LoopbackBWEntry holds the measured loopback bandwidth for one GPU-NIC pair.
@@ -38,8 +41,9 @@ type loopbackJSON struct {
 
 // BuildLoopbackScript generates a bash script that runs ib_write_bw loopback
 // tests for every GPU-NIC combination and emits a JSON bandwidth matrix.
+// qps sets the number of queue pairs (-q flag); use 0 for the default (4).
 // Returns an error if any NIC device name fails validation.
-func BuildLoopbackScript(gpuIDs []int, nicDevs []string, iters, msgSize, perTestTimeout int) (string, error) {
+func BuildLoopbackScript(gpuIDs []int, nicDevs []string, iters, msgSize, perTestTimeout, qps int) (string, error) {
 	if len(gpuIDs) == 0 {
 		return "", fmt.Errorf("no GPU IDs provided")
 	}
@@ -60,6 +64,9 @@ func BuildLoopbackScript(gpuIDs []int, nicDevs []string, iters, msgSize, perTest
 	if perTestTimeout <= 0 {
 		perTestTimeout = DefaultPerTestTimeoutSecs
 	}
+	if qps <= 0 {
+		qps = DefaultLoopbackQPs
+	}
 
 	gpuStrs := make([]string, len(gpuIDs))
 	for i, id := range gpuIDs {
@@ -72,7 +79,7 @@ func BuildLoopbackScript(gpuIDs []int, nicDevs []string, iters, msgSize, perTest
 	sb.WriteString(fmt.Sprintf("NIC_DEVS='%s'\n", strings.Join(nicDevs, ",")))
 	sb.WriteString(fmt.Sprintf("iters=%d\n", iters))
 	sb.WriteString(fmt.Sprintf("msg_size=%d\n", msgSize))
-	sb.WriteString(fmt.Sprintf("num_qps=%d\n", DefaultLoopbackQPs))
+	sb.WriteString(fmt.Sprintf("num_qps=%d\n", qps))
 	sb.WriteString(fmt.Sprintf("per_test_timeout=%d\n", perTestTimeout))
 	sb.WriteString(fmt.Sprintf("base_port=%d\n", DefaultLoopbackBasePort))
 	sb.WriteString(`
@@ -152,10 +159,11 @@ func ParseLoopbackBWOutput(logs string) ([]LoopbackBWEntry, error) {
 // and near-optimal results for non-diagonal cases.
 //
 // Phase 2 handles leftover GPUs (when GPUs > NICs or when sparse BW data
-// leaves some GPUs unmatched in Phase 1). Each leftover GPU is assigned the
-// NIC with the highest measured bandwidth from the already-paired NIC set,
-// allowing NIC reuse. If no BW data exists for a GPU, it round-robins across
-// the paired NICs.
+// leaves some GPUs unmatched in Phase 1). Only NICs already assigned in
+// Phase 1 are candidates — Phase 2 reuses them. For each leftover GPU,
+// the NIC (among those Phase 1 winners) that showed the highest measured
+// bandwidth to this specific GPU is selected. If no BW data exists for a
+// GPU, it round-robins across the Phase 1 NICs.
 func BandwidthOptimalPairing(bwEntries []LoopbackBWEntry, gpus []checks.GPUInfo, nics []checks.NICInfo) []checks.GPUNICPair {
 	if len(gpus) == 0 || len(nics) == 0 {
 		return nil
@@ -190,6 +198,12 @@ func BandwidthOptimalPairing(bwEntries []LoopbackBWEntry, gpus []checks.GPUInfo,
 		limit = len(nics)
 	}
 
+	// Build BW lookup keyed by (gpu_id, nic_dev) for setting IntrahostBWGbps on pairs.
+	bwLookup := make(map[[2]interface{}]float64, len(bwEntries))
+	for _, e := range bwEntries {
+		bwLookup[[2]interface{}{e.GPUId, e.NICDev}] = e.BWGbps
+	}
+
 	// Phase 1: greedy 1:1 assignment
 	for _, e := range sorted {
 		if len(pairs) >= limit {
@@ -203,7 +217,7 @@ func BandwidthOptimalPairing(bwEntries []LoopbackBWEntry, gpus []checks.GPUInfo,
 		if !gOK || !nOK {
 			continue
 		}
-		pairs = append(pairs, checks.GPUNICPair{GPU: gpu, NIC: nic, PCIeHops: 0})
+		pairs = append(pairs, checks.GPUNICPair{GPU: gpu, NIC: nic, PCIeHops: 0, IntrahostBWGbps: e.BWGbps})
 		assignedGPU[e.GPUId] = true
 		assignedNIC[e.NICDev] = true
 	}
@@ -232,24 +246,29 @@ func BandwidthOptimalPairing(bwEntries []LoopbackBWEntry, gpus []checks.GPUInfo,
 		for _, p := range pairs {
 			pairedNICs = append(pairedNICs, p.NIC)
 		}
-		rrIdx := 0
-		// Iterates gpus in caller-provided slice order; final sort by GPU ID below
-		// ensures deterministic output regardless of input ordering.
+		leftover := make([]checks.GPUInfo, 0, len(gpus)-len(pairs))
 		for _, g := range gpus {
-			if assignedGPU[g.ID] {
-				continue
+			if !assignedGPU[g.ID] {
+				leftover = append(leftover, g)
 			}
+		}
+		sort.Slice(leftover, func(i, j int) bool { return leftover[i].ID < leftover[j].ID })
+		rrIdx := 0
+		for _, g := range leftover {
 			if best, ok := gpuBestNIC[g.ID]; ok && best.BWGbps > 0 {
 				pairs = append(pairs, checks.GPUNICPair{
-					GPU:      g,
-					NIC:      pairedNICSet[best.NICDev],
-					PCIeHops: 0,
+					GPU:             g,
+					NIC:             pairedNICSet[best.NICDev],
+					PCIeHops:        0,
+					IntrahostBWGbps: best.BWGbps,
 				})
 			} else {
+				bw := bwLookup[[2]interface{}{g.ID, pairedNICs[rrIdx%len(pairedNICs)].Dev}]
 				pairs = append(pairs, checks.GPUNICPair{
-					GPU:      g,
-					NIC:      pairedNICs[rrIdx%len(pairedNICs)],
-					PCIeHops: 0,
+					GPU:             g,
+					NIC:             pairedNICs[rrIdx%len(pairedNICs)],
+					PCIeHops:        0,
+					IntrahostBWGbps: bw,
 				})
 				rrIdx++
 			}
