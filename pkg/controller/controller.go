@@ -569,7 +569,6 @@ func (c *Controller) Run(ctx context.Context) error {
 				} else if c.bwProbeMaxMatrixSize == 0 {
 					fmt.Fprintln(c.output, "  No BW probe jobs created (all flat nodes skipped)")
 				} else {
-					fmt.Fprintln(c.output, "  Waiting for loopback BW probe Jobs to complete...")
 					bwResults, probeErr := c.waitAndCollectLoopbackBWProbeJobs(ctx)
 					if probeErr != nil {
 						fmt.Fprintf(c.output, "  Warning: BW probe collection error: %v\n", probeErr)
@@ -1296,6 +1295,7 @@ func (c *Controller) waitAndCollectLoopbackBWProbeJobs(ctx context.Context) (map
 		probeTimeout = c.opts.Timeout
 	}
 	fmt.Fprintf(c.output, "  BW probe timeout: %v (matrix size: %d pairs)\n", probeTimeout.Round(time.Second), c.bwProbeMaxMatrixSize)
+	fmt.Fprintln(c.output, "  Waiting for loopback BW probe Jobs to complete...")
 
 	timeout := time.After(probeTimeout)
 	ticker := time.NewTicker(5 * time.Second)
