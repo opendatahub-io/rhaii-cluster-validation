@@ -373,3 +373,133 @@ func TestBuildRailMap(t *testing.T) {
 		t.Errorf("buildRailMap(nil) should return empty map, got %v", nilMap)
 	}
 }
+
+func makeNodeReportWithTopo(node string, topo *checks.NodeTopology) checks.NodeReport {
+	return checks.NodeReport{
+		Node: node,
+		Results: []checks.Result{
+			{
+				Category: "networking_rdma",
+				Name:     "gpu_nic_topology",
+				Status:   checks.StatusPass,
+				Message:  "2 GPU(s), 2 NIC(s), strategy=numa_affinity: GPU0↔mlx5_0, GPU1↔mlx5_1",
+				Details:  topo,
+			},
+		},
+	}
+}
+
+func TestApplyBandwidthPairing_Basic(t *testing.T) {
+	topo := &checks.NodeTopology{
+		GPUList: []checks.GPUInfo{
+			{ID: 0, NUMA: 0, PCIAddr: "0001:00:00.0"},
+			{ID: 1, NUMA: 0, PCIAddr: "0002:00:00.0"},
+		},
+		NICList: []checks.NICInfo{
+			{Dev: "mlx5_0", NUMA: 0, PCIAddr: "0101:00:00.0"},
+			{Dev: "mlx5_1", NUMA: 0, PCIAddr: "0102:00:00.0"},
+		},
+		Pairs: []checks.GPUNICPair{
+			{GPU: checks.GPUInfo{ID: 0}, NIC: checks.NICInfo{Dev: "mlx5_0"}},
+			{GPU: checks.GPUInfo{ID: 1}, NIC: checks.NICInfo{Dev: "mlx5_1"}},
+		},
+		PairingStrategy: checks.PairingNUMAAffinity,
+		IsFlat:          true,
+	}
+
+	netReports := []checks.NodeReport{makeNodeReportWithTopo("node-1", topo)}
+	bwResults := map[string]*rdma.LoopbackBWReport{
+		"node-1": {
+			Results: []rdma.LoopbackBWEntry{
+				{GPUId: 0, NICDev: "mlx5_0", BWGbps: 427},
+				{GPUId: 0, NICDev: "mlx5_1", BWGbps: 189},
+				{GPUId: 1, NICDev: "mlx5_0", BWGbps: 189},
+				{GPUId: 1, NICDev: "mlx5_1", BWGbps: 427},
+			},
+		},
+	}
+
+	c := &Controller{output: &bytes.Buffer{}}
+	updated := c.applyBandwidthPairing(netReports, bwResults)
+
+	updatedTopo := checks.ExtractTopology(updated[0])
+	if updatedTopo == nil {
+		t.Fatal("expected topology in updated report")
+	}
+	if updatedTopo.PairingStrategy != checks.PairingBandwidthProbe {
+		t.Errorf("strategy = %q, want %q", updatedTopo.PairingStrategy, checks.PairingBandwidthProbe)
+	}
+	if len(updatedTopo.Pairs) != 2 {
+		t.Fatalf("expected 2 pairs, got %d", len(updatedTopo.Pairs))
+	}
+	// Diagonal dominant: GPU0↔mlx5_0 (427), GPU1↔mlx5_1 (427)
+	if updatedTopo.Pairs[0].GPU.ID != 0 || updatedTopo.Pairs[0].NIC.Dev != "mlx5_0" {
+		t.Errorf("pair 0: expected GPU0↔mlx5_0, got GPU%d↔%s", updatedTopo.Pairs[0].GPU.ID, updatedTopo.Pairs[0].NIC.Dev)
+	}
+	if updatedTopo.Pairs[0].IntrahostBWGbps != 427 {
+		t.Errorf("pair 0 BW = %f, want 427", updatedTopo.Pairs[0].IntrahostBWGbps)
+	}
+	if updatedTopo.Pairs[1].GPU.ID != 1 || updatedTopo.Pairs[1].NIC.Dev != "mlx5_1" {
+		t.Errorf("pair 1: expected GPU1↔mlx5_1, got GPU%d↔%s", updatedTopo.Pairs[1].GPU.ID, updatedTopo.Pairs[1].NIC.Dev)
+	}
+
+	// Check that Result.Message was updated
+	for _, res := range updated[0].Results {
+		if res.Name == "gpu_nic_topology" {
+			if !strings.Contains(res.Message, "intra-host_bandwidth") {
+				t.Errorf("expected strategy in message, got: %s", res.Message)
+			}
+			break
+		}
+	}
+}
+
+func TestApplyBandwidthPairing_SkipsNonFlat(t *testing.T) {
+	topo := &checks.NodeTopology{
+		GPUList: []checks.GPUInfo{{ID: 0}},
+		NICList: []checks.NICInfo{{Dev: "mlx5_0"}},
+		Pairs:   []checks.GPUNICPair{{GPU: checks.GPUInfo{ID: 0}, NIC: checks.NICInfo{Dev: "mlx5_0"}}},
+		PairingStrategy: checks.PairingPCIeDistance,
+	}
+
+	netReports := []checks.NodeReport{makeNodeReportWithTopo("node-1", topo)}
+	bwResults := map[string]*rdma.LoopbackBWReport{
+		"node-1": {
+			Results: []rdma.LoopbackBWEntry{
+				{GPUId: 0, NICDev: "mlx5_0", BWGbps: 400},
+			},
+		},
+	}
+
+	c := &Controller{output: &bytes.Buffer{}}
+	updated := c.applyBandwidthPairing(netReports, bwResults)
+
+	updatedTopo := checks.ExtractTopology(updated[0])
+	if updatedTopo.PairingStrategy != checks.PairingPCIeDistance {
+		t.Errorf("expected PCIe distance pairing to be preserved, got %q", updatedTopo.PairingStrategy)
+	}
+}
+
+func TestApplyBandwidthPairing_EmptyBW(t *testing.T) {
+	topo := &checks.NodeTopology{
+		GPUList:         []checks.GPUInfo{{ID: 0}},
+		NICList:         []checks.NICInfo{{Dev: "mlx5_0"}},
+		Pairs:           []checks.GPUNICPair{{GPU: checks.GPUInfo{ID: 0}, NIC: checks.NICInfo{Dev: "mlx5_0"}}},
+		PairingStrategy: checks.PairingNUMAAffinity,
+		IsFlat:          true,
+	}
+
+	netReports := []checks.NodeReport{makeNodeReportWithTopo("node-1", topo)}
+	bwResults := map[string]*rdma.LoopbackBWReport{
+		"node-1": {Results: []rdma.LoopbackBWEntry{}},
+	}
+
+	c := &Controller{output: &bytes.Buffer{}}
+	updated := c.applyBandwidthPairing(netReports, bwResults)
+
+	// No BW entries => BandwidthOptimalPairing returns empty => keeps NUMA-affinity
+	updatedTopo := checks.ExtractTopology(updated[0])
+	if updatedTopo.PairingStrategy != checks.PairingNUMAAffinity {
+		t.Errorf("expected NUMA-affinity fallback with empty BW data, got %q", updatedTopo.PairingStrategy)
+	}
+}

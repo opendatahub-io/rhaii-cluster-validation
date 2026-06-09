@@ -61,6 +61,8 @@ const (
 	PairingPCIeDistance PairingStrategy = "pcie_distance"
 	// PairingNUMALoadBalance distributes GPUs across NICs within each NUMA.
 	PairingNUMALoadBalance PairingStrategy = "numa_load_balance"
+	// PairingBandwidthProbe pairs by measured intra-host loopback ib_write_bw bandwidth.
+	PairingBandwidthProbe PairingStrategy = "intra-host_bandwidth"
 )
 
 // GPUInfo describes a single GPU with its PCIe location.
@@ -87,36 +89,41 @@ type NICInfo struct {
 // nic_dev, nic_numa, pcie_hops) to avoid repeating data already present
 // in gpu_list/nic_list.
 type GPUNICPair struct {
-	GPU      GPUInfo
-	NIC      NICInfo
-	PCIeHops int
+	GPU            GPUInfo
+	NIC            NICInfo
+	PCIeHops       int
+	IntrahostBWGbps float64 // Measured intra-host loopback bandwidth; 0 means not measured.
 }
 
 // MarshalJSON outputs a slim representation of the pair.
 func (p GPUNICPair) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		GPUID    int    `json:"gpu_id"`
-		GPUNUMA  int    `json:"gpu_numa"`
-		NICDev   string `json:"nic_dev"`
-		NICNUMA  int    `json:"nic_numa"`
-		PCIeHops int    `json:"pcie_hops"`
+	slim := struct {
+		GPUID           int     `json:"gpu_id"`
+		GPUNUMA         int     `json:"gpu_numa"`
+		NICDev          string  `json:"nic_dev"`
+		NICNUMA         int     `json:"nic_numa"`
+		PCIeHops        int     `json:"pcie_hops"`
+		IntrahostBWGbps float64 `json:"intrahost_bandwidth_gbps"`
 	}{
-		GPUID:    p.GPU.ID,
-		GPUNUMA:  p.GPU.NUMA,
-		NICDev:   p.NIC.Dev,
-		NICNUMA:  p.NIC.NUMA,
-		PCIeHops: p.PCIeHops,
-	})
+		GPUID:           p.GPU.ID,
+		GPUNUMA:         p.GPU.NUMA,
+		NICDev:          p.NIC.Dev,
+		NICNUMA:         p.NIC.NUMA,
+		PCIeHops:        p.PCIeHops,
+		IntrahostBWGbps: p.IntrahostBWGbps,
+	}
+	return json.Marshal(slim)
 }
 
 // UnmarshalJSON reconstructs a GPUNICPair from slim JSON.
 func (p *GPUNICPair) UnmarshalJSON(data []byte) error {
 	var slim struct {
-		GPUID    int    `json:"gpu_id"`
-		GPUNUMA  int    `json:"gpu_numa"`
-		NICDev   string `json:"nic_dev"`
-		NICNUMA  int    `json:"nic_numa"`
-		PCIeHops int    `json:"pcie_hops"`
+		GPUID           int      `json:"gpu_id"`
+		GPUNUMA         int      `json:"gpu_numa"`
+		NICDev          string   `json:"nic_dev"`
+		NICNUMA         int      `json:"nic_numa"`
+		PCIeHops        int      `json:"pcie_hops"`
+		IntrahostBWGbps float64  `json:"intrahost_bandwidth_gbps"`
 	}
 	if err := json.Unmarshal(data, &slim); err != nil {
 		return err
@@ -131,6 +138,10 @@ func (p *GPUNICPair) UnmarshalJSON(data []byte) error {
 	p.GPU = GPUInfo{ID: slim.GPUID, NUMA: slim.GPUNUMA}
 	p.NIC = NICInfo{Dev: slim.NICDev, NUMA: slim.NICNUMA}
 	p.PCIeHops = slim.PCIeHops
+	if slim.IntrahostBWGbps < 0 {
+		return fmt.Errorf("invalid GPUNICPair: negative intrahost_bandwidth_gbps %f", slim.IntrahostBWGbps)
+	}
+	p.IntrahostBWGbps = slim.IntrahostBWGbps
 	return nil
 }
 
