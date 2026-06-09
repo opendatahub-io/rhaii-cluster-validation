@@ -97,7 +97,7 @@ for gpu in "${GPUS[@]}"; do
     timeout "$per_test_timeout" ib_write_bw -d "$nic" --use_cuda "$gpu" \
       -p "$port" -n "$iters" --size "$msg_size" -q "$num_qps" --report_gbits > /dev/null 2>&1 &
     srv=$!
-    sleep 2
+    sleep 4
 
     json_file="/tmp/bw_${gpu}_${nic}.json"
     timeout "$per_test_timeout" ib_write_bw -d "$nic" --use_cuda "$gpu" \
