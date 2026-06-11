@@ -31,6 +31,51 @@ func TestGPUNICPairMarshalJSON(t *testing.T) {
 	}
 }
 
+func TestGPUNICPairMarshalWithBandwidth(t *testing.T) {
+	pair := GPUNICPair{
+		GPU:             GPUInfo{ID: 0, NUMA: 0},
+		NIC:             NICInfo{Dev: "mlx5_0", NUMA: 0},
+		PCIeHops:        0,
+		IntrahostBWGbps: 427.09,
+	}
+
+	data, err := json.Marshal(pair)
+	if err != nil {
+		t.Fatalf("MarshalJSON failed: %v", err)
+	}
+
+	s := string(data)
+	if !strings.Contains(s, `"intrahost_bandwidth_gbps":427.09`) {
+		t.Errorf("expected intrahost_bandwidth_gbps:427.09 in output, got: %s", s)
+	}
+
+	var roundTrip GPUNICPair
+	if err := json.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("UnmarshalJSON failed: %v", err)
+	}
+	if roundTrip.IntrahostBWGbps != 427.09 {
+		t.Errorf("expected IntrahostBWGbps=427.09 after round-trip, got %f", roundTrip.IntrahostBWGbps)
+	}
+}
+
+func TestGPUNICPairMarshalZeroBandwidth(t *testing.T) {
+	pair := GPUNICPair{
+		GPU:      GPUInfo{ID: 0, NUMA: 0},
+		NIC:      NICInfo{Dev: "mlx5_0", NUMA: 0},
+		PCIeHops: 3,
+	}
+
+	data, err := json.Marshal(pair)
+	if err != nil {
+		t.Fatalf("MarshalJSON failed: %v", err)
+	}
+
+	s := string(data)
+	if !strings.Contains(s, `"intrahost_bandwidth_gbps":0`) {
+		t.Errorf("expected intrahost_bandwidth_gbps:0 (not omitted) in output, got: %s", s)
+	}
+}
+
 func TestGPUNICPairMarshalCrossNUMA(t *testing.T) {
 	pair := GPUNICPair{
 		GPU:      GPUInfo{ID: 4, NUMA: 1},
