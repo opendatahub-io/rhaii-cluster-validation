@@ -12,15 +12,21 @@ spec:
       labels:
         app: rhaii-validate-check
     spec:
+      # Universal toleration: GPU nodes carry platform-specific taints
+      # (nvidia.com/gpu, sku=gpu on AKS, custom taints on CoreWeave/EKS)
+      # that we cannot fully enumerate. The nodeSelector on
+      # kubernetes.io/hostname is the primary scheduling constraint that
+      # pins the pod to a specific GPU node; this toleration ensures the
+      # pod is not rejected by unexpected taints on that node.
       tolerations:
         - operator: Exists
-      hostPID: true
       containers:
         - name: checker
           image: ${IMG}
           imagePullPolicy: Always
           securityContext:
             privileged: true
+            readOnlyRootFilesystem: true
           args:
             - run
             - --node-name
@@ -31,17 +37,10 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           volumeMounts:
-            - name: host-root
-              mountPath: /host
-              readOnly: true
             - name: config
               mountPath: /etc/rhaii-validate
               readOnly: true
       volumes:
-        - name: host-root
-          hostPath:
-            path: /
-            type: Directory
         - name: config
           configMap:
             name: rhaii-validate-config

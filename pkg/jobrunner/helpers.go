@@ -82,6 +82,9 @@ func BuildJobSpec(name, node, namespace, image string, role Role, podCfg *PodCon
 					NodeSelector: map[string]string{
 						"kubernetes.io/hostname": node,
 					},
+					// Universal toleration: GPU nodes carry platform-specific taints
+					// that we cannot enumerate. The nodeSelector pins the pod to a
+					// specific GPU node; this toleration prevents taint rejection.
 					Tolerations: []corev1.Toleration{
 						{Operator: corev1.TolerationOpExists},
 					},
