@@ -1275,7 +1275,7 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 						Containers: []corev1.Container{{
 							Name:            "bw-probe",
 							Image:           c.opts.ToolsImage,
-							ImagePullPolicy: corev1.PullAlways,
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"/bin/bash", "-c", script},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,

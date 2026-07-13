@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	imagereferences "github.com/opendatahub-io/rhaii-cluster-validation/manifests/image-references"
 	"gopkg.in/yaml.v3"
@@ -58,6 +59,14 @@ func ResolveImages() (validatorImage, toolsImage string, err error) {
 	}
 	if len(missing) > 0 {
 		return "", "", fmt.Errorf("missing required image(s): %v — set via image-references.yaml or environment variables", missing)
+	}
+
+	for _, ref := range []string{validatorImage, toolsImage} {
+		if !strings.Contains(ref, "@sha256:") {
+			fmt.Fprintf(os.Stderr, "Warning: image %q uses a mutable tag; consider pinning by digest or setting %s / %s\n",
+				ref, EnvValidatorImage, EnvToolsImage)
+			break
+		}
 	}
 
 	return validatorImage, toolsImage, nil
