@@ -100,7 +100,7 @@ func (j *RDMABandwidthJob) buildArgs() []string {
 	if j.MessageSize > 0 {
 		args = append(args, "--size", fmt.Sprintf("%d", j.MessageSize))
 	}
-	if j.Device != "" {
+	if j.Device != "" && checks.ValidDeviceName.MatchString(j.Device) {
 		args = append(args, "-d", j.Device)
 	}
 	if j.UseCUDA >= 0 {
