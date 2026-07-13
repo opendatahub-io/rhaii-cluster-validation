@@ -1244,6 +1244,7 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 
 		backoffLimit := int32(0)
 		privileged := true
+		noMount := false
 		gracePeriod := int64(5)
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1266,6 +1267,7 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 						RestartPolicy:                 corev1.RestartPolicyNever,
 						TerminationGracePeriodSeconds: &gracePeriod,
 						ServiceAccountName:            "rhaii-validator",
+						AutomountServiceAccountToken:  &noMount,
 						Tolerations: []corev1.Toleration{
 							{Operator: corev1.TolerationOpExists},
 						},

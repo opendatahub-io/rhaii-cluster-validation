@@ -20,6 +20,7 @@ spec:
       # pod is not rejected by unexpected taints on that node.
       tolerations:
         - operator: Exists
+      automountServiceAccountToken: false
       containers:
         - name: checker
           image: ${IMG}
