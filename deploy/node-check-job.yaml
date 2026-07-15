@@ -24,7 +24,7 @@ spec:
       containers:
         - name: checker
           image: ${IMG}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
             readOnlyRootFilesystem: true
