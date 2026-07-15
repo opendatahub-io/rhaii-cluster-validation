@@ -19,4 +19,5 @@ stdout.log
 # Go
 vendor/
 .claude/
+.work/
 cursor-context/
