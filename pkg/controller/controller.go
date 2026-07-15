@@ -451,7 +451,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to create platform config: %w", err)
 	}
 
-	// OpenShift: grant hostmount-anyuid SCC (needed for /host volume mount)
+	// OpenShift: grant privileged SCC (needed for host sysfs access in topology checks)
 	if c.platform == config.PlatformOCP {
 		if err := c.ensureOpenShiftSCC(ctx); err != nil {
 			fmt.Fprintf(c.output, "  Warning: failed to create SCC binding: %v\n", err)
@@ -2505,8 +2505,8 @@ func (c *Controller) resolveStarNodes(gpuNodes []string) (string, []string) {
 }
 
 // ensureOpenShiftSCC grants the privileged SCC to the service account.
-// The check Jobs need privileged access for chroot /host to work with
-// topology and RDMA checks (host device access, sysfs, ibv_devices, ibstat).
+// The check Jobs need privileged access for host sysfs visibility
+// (PCI topology, RDMA device discovery via /sys/class/infiniband).
 func (c *Controller) ensureOpenShiftSCC(ctx context.Context) error {
 	crb := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
