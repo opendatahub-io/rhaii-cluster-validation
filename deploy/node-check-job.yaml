@@ -20,10 +20,11 @@ spec:
       # pod is not rejected by unexpected taints on that node.
       tolerations:
         - operator: Exists
+      automountServiceAccountToken: false
       containers:
         - name: checker
           image: ${IMG}
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
             readOnlyRootFilesystem: true

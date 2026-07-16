@@ -138,8 +138,11 @@ func (j *RDMAWEPJob) clientScript(serverIP string) []string {
 	cmds = append(cmds, "wait")
 	// Output all results so ParseResult can sum them
 	cmds = append(cmds, "echo '=== WEP RESULTS ==='")
-	for i := range j.Devices {
-		cmds = append(cmds, fmt.Sprintf("echo '--- NIC %d: %s ---'", i, j.Devices[i]))
+	for i, dev := range j.Devices {
+		if !checks.ValidDeviceName.MatchString(dev) {
+			continue
+		}
+		cmds = append(cmds, fmt.Sprintf("echo '--- NIC %d: %s ---'", i, dev))
 		cmds = append(cmds, fmt.Sprintf("cat /tmp/wep/nic%d.txt", i))
 	}
 	script := strings.Join(cmds, "\n")

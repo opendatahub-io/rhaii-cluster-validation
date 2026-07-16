@@ -21,6 +21,7 @@ func BuildJobSpec(name, node, namespace, image string, role Role, podCfg *PodCon
 	}
 
 	var backoffLimit int32 = 0
+	noMount := false
 
 	jobName := fmt.Sprintf("%s-%s-%s", name, role, node)
 	if podCfg != nil && podCfg.NameSuffix != "" {
@@ -82,6 +83,7 @@ func BuildJobSpec(name, node, namespace, image string, role Role, podCfg *PodCon
 					NodeSelector: map[string]string{
 						"kubernetes.io/hostname": node,
 					},
+					AutomountServiceAccountToken: &noMount,
 					// Universal toleration: GPU nodes carry platform-specific taints
 					// that we cannot enumerate. The nodeSelector pins the pod to a
 					// specific GPU node; this toleration prevents taint rejection.
