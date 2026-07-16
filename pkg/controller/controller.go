@@ -370,6 +370,19 @@ func (c *Controller) printDebugHelp(ctx context.Context) {
 	fmt.Fprintf(c.output, "Cleanup: kubectl rhaii-validate clean\n")
 }
 
+// printDebugCleanupHint prints the exact commands to manually remove cluster-scoped
+// RBAC resources that were left behind by --debug mode.
+func (c *Controller) printDebugCleanupHint() {
+	ns := c.opts.Namespace
+	fmt.Fprintln(c.output, "")
+	fmt.Fprintln(c.output, "NOTE: --debug mode skips automatic cleanup. Cluster-scoped RBAC resources remain.")
+	fmt.Fprintln(c.output, "To remove them manually:")
+	fmt.Fprintf(c.output, "  kubectl delete clusterrolebinding rhaii-validator %s\n", c.sccBindingName())
+	fmt.Fprintf(c.output, "  kubectl delete clusterrole rhaii-validator\n")
+	fmt.Fprintf(c.output, "  kubectl delete serviceaccount -n %s rhaii-validator\n", ns)
+	fmt.Fprintln(c.output, "Or run: kubectl rhaii-validate clean")
+}
+
 // Cleanup removes all validation resources from the cluster.
 func (c *Controller) Cleanup() error {
 	ctx := context.Background()
@@ -444,6 +457,18 @@ func (c *Controller) Run(ctx context.Context) error {
 	if err := c.ensureRBAC(ctx); err != nil {
 		return fmt.Errorf("failed to create RBAC: %w", err)
 	}
+
+	// Ensure cluster-scoped RBAC is cleaned up on any early return.
+	// In --debug mode we skip cleanup but print the exact commands to run manually.
+	defer func() {
+		if c.opts.Debug {
+			c.printDebugCleanupHint()
+			return
+		}
+		if err := c.cleanupAll(context.Background()); err != nil {
+			fmt.Fprintf(c.output, "  Warning: deferred cleanup failed: %v\n", err)
+		}
+	}()
 
 	// Step 4: Detect platform and create config ConfigMap
 	fmt.Fprintln(c.output, "[Step 4] Detecting platform and creating config...")
@@ -660,14 +685,12 @@ func (c *Controller) Run(ctx context.Context) error {
 		hasFailures = c.printReport(allReports, jobResults)
 	}
 
-	// Cleanup or keep for debugging
+	// Debug help is printed by the deferred cleanup. On the success path,
+	// show the job logs hint before the defer runs cleanup.
 	if c.opts.Debug {
 		c.printDebugHelp(ctx)
 	} else {
 		fmt.Fprintln(c.output, "Cleaning up...")
-		if err := c.cleanupAll(ctx); err != nil {
-			fmt.Fprintf(c.output, "  Warning: cleanup failed: %v\n", err)
-		}
 	}
 
 	totalReports := len(gpuReports) + len(netReports)
@@ -1244,6 +1267,7 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 
 		backoffLimit := int32(0)
 		privileged := true
+		noMount := false
 		gracePeriod := int64(5)
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1266,6 +1290,7 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 						RestartPolicy:                 corev1.RestartPolicyNever,
 						TerminationGracePeriodSeconds: &gracePeriod,
 						ServiceAccountName:            "rhaii-validator",
+						AutomountServiceAccountToken:  &noMount,
 						Tolerations: []corev1.Toleration{
 							{Operator: corev1.TolerationOpExists},
 						},
@@ -1275,7 +1300,7 @@ func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports [
 						Containers: []corev1.Container{{
 							Name:            "bw-probe",
 							Image:           c.opts.ToolsImage,
-							ImagePullPolicy: corev1.PullAlways,
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"/bin/bash", "-c", script},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
@@ -2507,10 +2532,14 @@ func (c *Controller) resolveStarNodes(gpuNodes []string) (string, []string) {
 // ensureOpenShiftSCC grants the privileged SCC to the service account.
 // The check Jobs need privileged access for host sysfs visibility
 // (PCI topology, RDMA device discovery via /sys/class/infiniband).
+func (c *Controller) sccBindingName() string {
+	return "rhaii-validator-scc-" + c.opts.Namespace
+}
+
 func (c *Controller) ensureOpenShiftSCC(ctx context.Context) error {
 	crb := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "rhaii-validator-scc",
+			Name: c.sccBindingName(),
 		},
 		Subjects: []rbacv1.Subject{{
 			Kind:      "ServiceAccount",
@@ -2609,7 +2638,7 @@ func (c *Controller) cleanupAll(ctx context.Context) error {
 			return c.client.RbacV1().ClusterRoleBindings().Delete(bgCtx, "rhaii-validator", metav1.DeleteOptions{})
 		},
 		func() error {
-			return c.client.RbacV1().ClusterRoleBindings().Delete(bgCtx, "rhaii-validator-scc", metav1.DeleteOptions{})
+			return c.client.RbacV1().ClusterRoleBindings().Delete(bgCtx, c.sccBindingName(), metav1.DeleteOptions{})
 		},
 		func() error {
 			return c.client.RbacV1().ClusterRoles().Delete(bgCtx, "rhaii-validator", metav1.DeleteOptions{})
