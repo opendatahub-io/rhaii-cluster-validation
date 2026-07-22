@@ -1,29 +1,25 @@
 ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.0.0-devel-ubi9
 ARG RUNTIME_IMAGE=registry.access.redhat.com/ubi9/ubi:latest
 
-# Perftest release tarball (pre-generated configure, no autotools needed)
-# Source: https://github.com/linux-rdma/perftest/releases/tag/25.10.0-0.128
-ARG PERFTEST_TARBALL=perftest-25.10.0-0.128.gd01b183.tar.gz
-
 # ============================================================================
 # Builder Stage: Build perftest from source (needs CUDA headers)
 # ============================================================================
 FROM ${BUILDER_IMAGE} AS builder
 
-ARG PERFTEST_TARBALL
-
-# Install build dependencies (no autotools needed — release tarball has pre-generated configure)
+# Install build dependencies (autotools needed — building from git source)
 RUN dnf install -y \
     gcc gcc-c++ make diffutils \
+    autoconf automake libtool \
     pciutils-devel \
     rdma-core-devel libibverbs-devel librdmacm-devel libibumad-devel \
     && dnf clean all
 
-# Build perftest with CUDA support
-COPY tools/${PERFTEST_TARBALL} /tmp/
-RUN mkdir /tmp/perftest && \
-    tar xzf /tmp/${PERFTEST_TARBALL} -C /tmp/perftest --strip-components=1 && \
+# Build perftest from source (git submodule) with CUDA support
+COPY tools/perftest/ /tmp/perftest/
+RUN test -f /tmp/perftest/autogen.sh || \
+    { echo "ERROR: tools/perftest/ is empty. Run: git submodule update --init tools/perftest"; exit 1; } && \
     cd /tmp/perftest && \
+    ./autogen.sh && \
     ./configure --prefix=/usr --enable-cudart && \
     make -j$(nproc) && \
     make install DESTDIR=/install
