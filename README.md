@@ -452,9 +452,13 @@ Vendor is auto-detected. No configuration needed.
 ## Building from Source
 
 ```bash
+git clone --recurse-submodules https://github.com/opendatahub-io/rhaii-cluster-validation.git
+cd rhaii-cluster-validation
 make install
 kubectl rhaii-validate all
 ```
+
+If you already cloned without `--recurse-submodules`, run `git submodule update --init` before building the tools container image.
 
 ## Development
 
@@ -464,7 +468,7 @@ make test               # Run unit tests
 make lint               # Run linter
 make install            # Build + install as kubectl plugin
 make container          # Build validator container image
-make container-rdma     # Build tools container image
+make container-rdma     # Build tools container image (requires submodules)
 make run-local          # Run checks locally (requires GPU node)
 ```
 
