@@ -8,6 +8,9 @@ packages:
   - gcc-c++
   - make
   - diffutils
+  - autoconf
+  - automake
+  - libtool
   - pciutils-devel
   - rdma-core-devel
   - libibverbs-devel
