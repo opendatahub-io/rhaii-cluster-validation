@@ -1,28 +1,26 @@
 # CUDA base image (UBI9-based, includes CUDA devel + runtime, sha-pinned)
 FROM registry.redhat.io/rhai/base-image-cuda-13.0-rhel9@sha256:e29b922fee43fd4b2396768b206c280fb91482a9b141ae9dfcfafa09b7462287 AS builder
 
-# Perftest release tarball (pre-generated configure, no autotools needed)
-# Source: https://github.com/linux-rdma/perftest/releases/tag/25.10.0-0.128
-ARG PERFTEST_TARBALL=perftest-25.10.0-0.128.gd01b183.tar.gz
-
 # Needed with aipcc image
 USER root
 
 # switch from internal mirrors to public vendor repos
 RUN ${APP_ROOT}/lib/tools/public-repos.sh
 
-# Install build dependencies (no autotools needed — release tarball has pre-generated configure)
+# Install build dependencies (autotools needed — building from git source)
 RUN dnf install -y \
     gcc gcc-c++ make diffutils \
+    autoconf automake libtool \
     pciutils-devel \
     rdma-core-devel libibverbs-devel librdmacm-devel libibumad-devel \
     && dnf clean all
 
-# Build perftest with CUDA support
-COPY tools/${PERFTEST_TARBALL} /tmp/
-RUN mkdir /tmp/perftest && \
-    tar xzf /tmp/${PERFTEST_TARBALL} -C /tmp/perftest --strip-components=1 && \
+# Build perftest from source (git submodule) with CUDA support
+COPY tools/perftest/ /tmp/perftest/
+RUN test -f /tmp/perftest/autogen.sh || \
+    { echo "ERROR: tools/perftest/ is empty. Run: git submodule update --init tools/perftest"; exit 1; } && \
     cd /tmp/perftest && \
+    ./autogen.sh && \
     ./configure --prefix=/usr --enable-cudart && \
     make -j$(nproc) && \
     make install DESTDIR=/install
