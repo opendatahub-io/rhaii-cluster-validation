@@ -64,10 +64,12 @@ RUN test -f /tmp/perftest/autogen.sh || \
     { echo "ERROR: tools/perftest/ is empty. Run: git submodule update --init tools/perftest"; exit 1; } && \
     cd /tmp/perftest && \
     ./autogen.sh && \
+    EXTRA_CFLAGS="" && \
+    [ "$(uname -m)" = "x86_64" ] && EXTRA_CFLAGS="-include immintrin.h" ; \
     ./configure --prefix=/usr --enable-cudart \
       CPPFLAGS="-I/opt/rdma-core/usr/include" \
       LDFLAGS="-L/opt/rdma-core/usr/lib64" \
-      CFLAGS="-O2 -include immintrin.h" && \
+      CFLAGS="-O2 $EXTRA_CFLAGS" && \
     make -j$(nproc) && \
     make install DESTDIR=/install
 
