@@ -38,7 +38,7 @@ RUN cd /tmp/libfabric && \
     ./configure --prefix=/usr \
       --with-cuda=/usr/local/cuda \
       CPPFLAGS="-I/opt/rdma-core/usr/include" \
-      LDFLAGS="-L/opt/rdma-core/usr/lib64" && \
+      LDFLAGS="-L/opt/rdma-core/usr/lib64 -L/usr/local/cuda/lib64" && \
     make -j$(nproc) && \
     make install DESTDIR=/opt/libfabric
 
@@ -50,7 +50,7 @@ RUN cd /tmp/libfabric/fabtests && \
       --with-cuda=/usr/local/cuda \
       --with-libfabric=/opt/libfabric/usr \
       CPPFLAGS="-I/opt/rdma-core/usr/include" \
-      LDFLAGS="-L/opt/rdma-core/usr/lib64" && \
+      LDFLAGS="-L/opt/rdma-core/usr/lib64 -L/usr/local/cuda/lib64" && \
     make -j$(nproc) && \
     make install DESTDIR=/opt/fabtests
 
