@@ -20,7 +20,7 @@ RUN dnf install -y \
     cuda-nvml-devel-13-0 \
     && dnf clean all
 
-# --- Step 1: Build rdma-core v60.0 from source ---
+# --- Step 1: Build and install rdma-core v60.0 to /usr ---
 # Provides: libibverbs.so, libefa.so (EFA), libmlx5.so (IB/RoCE), librdmacm.so
 COPY tools/rdma-core/ /tmp/rdma-core/
 RUN cd /tmp/rdma-core && \
@@ -30,30 +30,28 @@ RUN cd /tmp/rdma-core && \
       -DNO_MAN_PAGES=1 \
       -DNO_PYVERBS=1 && \
     ninja -C build -j$(nproc) && \
-    DESTDIR=/opt/rdma-core ninja -C build install
+    ninja -C build install && \
+    ldconfig
 
-# --- Step 2: Build libfabric v2.3.1amzn4.0 from source ---
+# --- Step 2: Build and install libfabric v2.3.1amzn4.0 to /usr ---
 # Provides: libfabric.so.1 with EFA provider + CUDA HMEM support
 COPY tools/libfabric/ /tmp/libfabric/
 RUN cd /tmp/libfabric && \
     ./autogen.sh && \
     ./configure --prefix=/usr --libdir=/usr/lib64 \
       --with-cuda=/usr/local/cuda \
-      --enable-cuda-dlopen \
-      CPPFLAGS="-I/opt/rdma-core/usr/include" \
-      LDFLAGS="-L/opt/rdma-core/usr/lib64" && \
+      --enable-cuda-dlopen && \
     make -j$(nproc) && \
-    make install DESTDIR=/opt/libfabric
+    make install && \
+    ldconfig
 
 # --- Step 3: Build fabtests (from libfabric source tree) ---
 # Provides: fi_rdm_pingpong (EFA reachability), fi_rma_bw (EFA bandwidth)
 RUN cd /tmp/libfabric/fabtests && \
     ./autogen.sh && \
-    ./configure --prefix=/usr \
+    ./configure --prefix=/usr --libdir=/usr/lib64 \
       --with-cuda=/usr/local/cuda \
-      --with-libfabric=/opt/libfabric/usr \
-      CPPFLAGS="-I/opt/rdma-core/usr/include" \
-      LDFLAGS="-L/opt/rdma-core/usr/lib64 -L/opt/libfabric/usr/lib64 -Wl,-rpath-link,/opt/rdma-core/usr/lib64" && \
+      --with-libfabric=/usr && \
     make -j$(nproc) && \
     make install DESTDIR=/opt/fabtests
 
@@ -64,14 +62,9 @@ RUN test -f /tmp/perftest/autogen.sh || \
     { echo "ERROR: tools/perftest/ is empty. Run: git submodule update --init tools/perftest"; exit 1; } && \
     cd /tmp/perftest && \
     ./autogen.sh && \
-    EXTRA_CFLAGS="" && \
-    [ "$(uname -m)" = "x86_64" ] && EXTRA_CFLAGS="-include immintrin.h" ; \
-    ./configure --prefix=/usr --enable-cudart \
-      CPPFLAGS="-I/opt/rdma-core/usr/include" \
-      LDFLAGS="-L/opt/rdma-core/usr/lib64" \
-      CFLAGS="-O2 $EXTRA_CFLAGS" && \
+    ./configure --prefix=/usr --enable-cudart && \
     make -j$(nproc) && \
-    make install DESTDIR=/install
+    make install DESTDIR=/opt/perftest
 
 # Runtime stage — vanilla UBI9, all RDMA libs copied from builder
 FROM registry.redhat.io/ubi9/ubi@sha256:157ac93fde9596b9e04908fa9a22746350f53452718af9562289239f68a505c6
@@ -86,19 +79,27 @@ RUN dnf install -y \
     iperf3 tcpdump pciutils libnl3 \
     && dnf clean all
 
-# Copy rdma-core libraries and utilities
-COPY --from=builder /opt/rdma-core/usr/lib64/ /usr/lib64/
-COPY --from=builder /opt/rdma-core/usr/bin/ /usr/bin/
+# Copy rdma-core libraries (libibverbs, libefa, libmlx5, librdmacm, etc.)
+COPY --from=builder /usr/lib64/libibverbs* /usr/lib64/
+COPY --from=builder /usr/lib64/librdmacm* /usr/lib64/
+COPY --from=builder /usr/lib64/libibumad* /usr/lib64/
+COPY --from=builder /usr/lib64/libefa* /usr/lib64/
+COPY --from=builder /usr/lib64/libmlx5* /usr/lib64/
+COPY --from=builder /usr/lib64/libmlx4* /usr/lib64/
+COPY --from=builder /usr/lib64/libibverbs/ /usr/lib64/libibverbs/
+
+# Copy rdma-core utilities
+COPY --from=builder /usr/bin/ibv_devinfo /usr/bin/ibv_devices /usr/bin/ibv_rc_pingpong /usr/bin/
 
 # Copy libfabric shared library and fi_info utility
-COPY --from=builder /opt/libfabric/usr/lib64/ /usr/lib64/
-COPY --from=builder /opt/libfabric/usr/bin/fi_info /usr/local/bin/
+COPY --from=builder /usr/lib64/libfabric* /usr/lib64/
+COPY --from=builder /usr/bin/fi_info /usr/local/bin/
 
 # Copy fabtests binaries (fi_rdm_pingpong, fi_rma_bw, etc.)
 COPY --from=builder /opt/fabtests/usr/bin/ /usr/local/bin/
 
 # Copy perftest binaries (ib_write_bw, ibv_rc_pingpong, etc.)
-COPY --from=builder /install/usr/bin/* /usr/local/bin/
+COPY --from=builder /opt/perftest/usr/bin/* /usr/local/bin/
 
 # Copy libcudart from builder — needed by perftest and fabtests at runtime.
 # The GPU driver library (libcuda.so.1) is mounted by the NVIDIA Container Toolkit.
