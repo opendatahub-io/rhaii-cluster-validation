@@ -1,4 +1,5 @@
 # CUDA base image (UBI9-based, includes CUDA devel + runtime, sha-pinned)
+# All component versions pinned to match AWS EFA installer 1.46.0 / llm-d v0.8.1
 FROM registry.redhat.io/rhai/base-image-cuda-13.0-rhel9@sha256:e29b922fee43fd4b2396768b206c280fb91482a9b141ae9dfcfafa09b7462287 AS builder
 
 # Needed with aipcc image
@@ -7,52 +8,96 @@ USER root
 # switch from internal mirrors to public vendor repos
 RUN ${APP_ROOT}/lib/tools/public-repos.sh
 
-# Install build dependencies (autotools needed — building from git source)
+# Install build dependencies
 RUN dnf install -y \
     gcc gcc-c++ make diffutils \
-    autoconf automake libtool \
+    autoconf automake libtool pkg-config \
+    cmake ninja-build \
+    libnl3-devel \
+    python3 \
     pciutils-devel \
-    rdma-core-devel libibverbs-devel librdmacm-devel libibumad-devel \
     && dnf clean all
 
-# Build perftest from source (git submodule) with CUDA support
+# --- Step 1: Build rdma-core v60.0 from source ---
+# Provides: libibverbs.so, libefa.so (EFA), libmlx5.so (IB/RoCE), librdmacm.so
+COPY tools/rdma-core/ /tmp/rdma-core/
+RUN cd /tmp/rdma-core && \
+    cmake -GNinja -B build \
+      -DCMAKE_INSTALL_PREFIX=/usr \
+      -DCMAKE_INSTALL_LIBDIR=lib64 \
+      -DNO_MAN_PAGES=1 \
+      -DNO_PYVERBS=1 && \
+    ninja -C build -j$(nproc) && \
+    DESTDIR=/opt/rdma-core ninja -C build install
+
+# --- Step 2: Build libfabric v2.3.1amzn4.0 from source ---
+# Provides: libfabric.so.1 with EFA provider + CUDA HMEM support
+COPY tools/libfabric/ /tmp/libfabric/
+RUN cd /tmp/libfabric && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr \
+      --with-cuda=/usr/local/cuda \
+      CPPFLAGS="-I/opt/rdma-core/usr/include" \
+      LDFLAGS="-L/opt/rdma-core/usr/lib64" && \
+    make -j$(nproc) && \
+    make install DESTDIR=/opt/libfabric
+
+# --- Step 3: Build fabtests (from libfabric source tree) ---
+# Provides: fi_rdm_pingpong (EFA reachability), fi_rma_bw (EFA bandwidth)
+RUN cd /tmp/libfabric/fabtests && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr \
+      --with-cuda=/usr/local/cuda \
+      --with-libfabric=/opt/libfabric/usr \
+      CPPFLAGS="-I/opt/rdma-core/usr/include" \
+      LDFLAGS="-L/opt/rdma-core/usr/lib64" && \
+    make -j$(nproc) && \
+    make install DESTDIR=/opt/fabtests
+
+# --- Step 4: Build perftest from source (existing) ---
+# Provides: ib_write_bw, ibv_rc_pingpong (IB/RoCE bandwidth + reachability)
 COPY tools/perftest/ /tmp/perftest/
 RUN test -f /tmp/perftest/autogen.sh || \
     { echo "ERROR: tools/perftest/ is empty. Run: git submodule update --init tools/perftest"; exit 1; } && \
     cd /tmp/perftest && \
     ./autogen.sh && \
-    ./configure --prefix=/usr --enable-cudart && \
+    ./configure --prefix=/usr --enable-cudart \
+      CPPFLAGS="-I/opt/rdma-core/usr/include" \
+      LDFLAGS="-L/opt/rdma-core/usr/lib64" && \
     make -j$(nproc) && \
     make install DESTDIR=/install
 
-# Runtime stage — vanilla UBI9, libcudart copied from builder
+# Runtime stage — vanilla UBI9, all RDMA libs copied from builder
 FROM registry.redhat.io/ubi9/ubi@sha256:157ac93fde9596b9e04908fa9a22746350f53452718af9562289239f68a505c6
 
-# Root required: RDMA perftest (ib_write_bw, ib_read_bw) and GPU bandwidth tools
-# need direct access to InfiniBand/RoCE devices and CUDA runtime.
 USER root
-
 WORKDIR /root
 
-# Install runtime utilities
+# Install runtime utilities (no system rdma-core — we bring our own from source)
 RUN dnf install -y \
     wget procps-ng jq bc iputils ethtool net-tools \
     numactl kmod systemd-udev libpcap python3 hostname \
-    iperf3 tcpdump pciutils \
+    iperf3 tcpdump pciutils libnl3 \
     && dnf clean all
 
-# Install RDMA libraries
-RUN dnf install -y libibverbs libibverbs-utils libibumad librdmacm infiniband-diags && dnf clean all
+# Copy rdma-core libraries and utilities
+COPY --from=builder /opt/rdma-core/usr/lib64/ /usr/lib64/
+COPY --from=builder /opt/rdma-core/usr/bin/ /usr/bin/
 
-# Copy perftest binaries from builder
+# Copy libfabric shared library
+COPY --from=builder /opt/libfabric/usr/lib64/ /usr/lib64/
+
+# Copy fabtests binaries (fi_rdm_pingpong, fi_rma_bw, fi_info, etc.)
+COPY --from=builder /opt/fabtests/usr/bin/ /usr/local/bin/
+
+# Copy perftest binaries (ib_write_bw, ibv_rc_pingpong, etc.)
 COPY --from=builder /install/usr/bin/* /usr/local/bin/
 
-# Copy libcudart from builder — the only CUDA library perftest needs at runtime (~756K).
+# Copy libcudart from builder — needed by perftest and fabtests at runtime.
 # The GPU driver library (libcuda.so.1) is mounted by the NVIDIA Container Toolkit.
 COPY --from=builder /usr/local/cuda/lib64/libcudart.so.* /usr/local/lib/
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/cuda.conf && ldconfig
 
-# Create results directory
 RUN mkdir -p /results
 
 CMD ["/bin/bash"]
@@ -60,7 +105,7 @@ CMD ["/bin/bash"]
 LABEL name="rhoai/odh-rhaii-validator-tools-rhel9" \
       com.redhat.component="odh-rhaii-validator-tools-rhel9" \
       summary="RHAII Validator Tools" \
-      description="RDMA and network bandwidth testing tools (iperf3, perftest) with CUDA support for preflight validation of xKS clusters before AI workload deployment" \
+      description="RDMA and network bandwidth testing tools (iperf3, perftest, fabtests) with CUDA support for preflight validation of xKS clusters before AI workload deployment. Supports IB/RoCEv2 (via perftest) and AWS EFA (via libfabric fabtests)." \
       maintainer="Red Hat LLM-D Team" \
       io.k8s.display-name="RHAII Validator Tools" \
-      io.k8s.description="RDMA and network bandwidth testing tools (iperf3, perftest) with CUDA support for preflight validation of xKS clusters before AI workload deployment"
+      io.k8s.description="RDMA and network bandwidth testing tools (iperf3, perftest, fabtests) with CUDA support for preflight validation of xKS clusters before AI workload deployment. Supports IB/RoCEv2 (via perftest) and AWS EFA (via libfabric fabtests)."
