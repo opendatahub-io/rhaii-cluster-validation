@@ -8,7 +8,7 @@ USER root
 # switch from internal mirrors to public vendor repos
 RUN ${APP_ROOT}/lib/tools/public-repos.sh
 
-# Install build dependencies
+# Install build dependencies (cuda-nvml-devel for nvml.h header needed by libfabric CUDA HMEM)
 RUN dnf install -y \
     gcc gcc-c++ make diffutils \
     autoconf automake libtool pkg-config \
@@ -16,6 +16,8 @@ RUN dnf install -y \
     libnl3-devel \
     python3 \
     pciutils-devel \
+    --enablerepo="external-nvidia-cuda-for-rhel-9-$(uname -m | sed 's/x86_64/x86_64/;s/aarch64/sbsa/')-rpms" \
+    cuda-nvml-devel-13-0 \
     && dnf clean all
 
 # --- Step 1: Build rdma-core v60.0 from source ---
@@ -35,7 +37,7 @@ RUN cd /tmp/rdma-core && \
 COPY tools/libfabric/ /tmp/libfabric/
 RUN cd /tmp/libfabric && \
     ./autogen.sh && \
-    ./configure --prefix=/usr \
+    ./configure --prefix=/usr --libdir=/usr/lib64 \
       --with-cuda=/usr/local/cuda \
       --enable-cuda-dlopen \
       CPPFLAGS="-I/opt/rdma-core/usr/include" \
@@ -51,7 +53,7 @@ RUN cd /tmp/libfabric/fabtests && \
       --with-cuda=/usr/local/cuda \
       --with-libfabric=/opt/libfabric/usr \
       CPPFLAGS="-I/opt/rdma-core/usr/include" \
-      LDFLAGS="-L/opt/rdma-core/usr/lib64 -L/opt/libfabric/usr/lib64" && \
+      LDFLAGS="-L/opt/rdma-core/usr/lib64 -L/opt/libfabric/usr/lib64 -Wl,-rpath-link,/opt/rdma-core/usr/lib64" && \
     make -j$(nproc) && \
     make install DESTDIR=/opt/fabtests
 
@@ -64,7 +66,8 @@ RUN test -f /tmp/perftest/autogen.sh || \
     ./autogen.sh && \
     ./configure --prefix=/usr --enable-cudart \
       CPPFLAGS="-I/opt/rdma-core/usr/include" \
-      LDFLAGS="-L/opt/rdma-core/usr/lib64" && \
+      LDFLAGS="-L/opt/rdma-core/usr/lib64" \
+      CFLAGS="-O2 -include immintrin.h" && \
     make -j$(nproc) && \
     make install DESTDIR=/install
 
@@ -85,10 +88,11 @@ RUN dnf install -y \
 COPY --from=builder /opt/rdma-core/usr/lib64/ /usr/lib64/
 COPY --from=builder /opt/rdma-core/usr/bin/ /usr/bin/
 
-# Copy libfabric shared library
+# Copy libfabric shared library and fi_info utility
 COPY --from=builder /opt/libfabric/usr/lib64/ /usr/lib64/
+COPY --from=builder /opt/libfabric/usr/bin/fi_info /usr/local/bin/
 
-# Copy fabtests binaries (fi_rdm_pingpong, fi_rma_bw, fi_info, etc.)
+# Copy fabtests binaries (fi_rdm_pingpong, fi_rma_bw, etc.)
 COPY --from=builder /opt/fabtests/usr/bin/ /usr/local/bin/
 
 # Copy perftest binaries (ib_write_bw, ibv_rc_pingpong, etc.)
