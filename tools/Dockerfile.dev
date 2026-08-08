@@ -84,11 +84,12 @@ RUN dnf install -y \
     iperf3 tcpdump pciutils \
     && dnf clean all
 
-# Copy rdma-core libraries (libibverbs, libefa, libmlx5, librdmacm, libibmad, etc.)
+# Copy rdma-core libraries (libibverbs, libefa, libmlx5, librdmacm, libibmad, libibnetdisc, etc.)
 COPY --from=builder /usr/lib64/libibverbs* /usr/lib64/
 COPY --from=builder /usr/lib64/librdmacm* /usr/lib64/
 COPY --from=builder /usr/lib64/libibumad* /usr/lib64/
 COPY --from=builder /usr/lib64/libibmad* /usr/lib64/
+COPY --from=builder /usr/lib64/libibnetdisc* /usr/lib64/
 COPY --from=builder /usr/lib64/libefa* /usr/lib64/
 COPY --from=builder /usr/lib64/libmlx5* /usr/lib64/
 COPY --from=builder /usr/lib64/libmlx4* /usr/lib64/

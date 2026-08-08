@@ -79,11 +79,12 @@ RUN dnf install -y \
     iperf3 tcpdump pciutils libnl3 \
     && dnf clean all
 
-# Copy rdma-core libraries (libibverbs, libefa, libmlx5, librdmacm, libibmad, etc.)
+# Copy rdma-core libraries (libibverbs, libefa, libmlx5, librdmacm, libibmad, libibnetdisc, etc.)
 COPY --from=builder /usr/lib64/libibverbs* /usr/lib64/
 COPY --from=builder /usr/lib64/librdmacm* /usr/lib64/
 COPY --from=builder /usr/lib64/libibumad* /usr/lib64/
 COPY --from=builder /usr/lib64/libibmad* /usr/lib64/
+COPY --from=builder /usr/lib64/libibnetdisc* /usr/lib64/
 COPY --from=builder /usr/lib64/libefa* /usr/lib64/
 COPY --from=builder /usr/lib64/libmlx5* /usr/lib64/
 COPY --from=builder /usr/lib64/libmlx4* /usr/lib64/
@@ -109,7 +110,8 @@ COPY --from=builder /opt/perftest/usr/bin/* /usr/local/bin/
 # Copy libcudart from builder — needed by perftest and fabtests at runtime.
 # The GPU driver library (libcuda.so.1) is mounted by the NVIDIA Container Toolkit.
 COPY --from=builder /usr/local/cuda/lib64/libcudart.so.* /usr/local/lib/
-RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/cuda.conf && ldconfig
+RUN ln -s libcudart.so.13 /usr/local/lib/libcudart.so && \
+    echo "/usr/local/lib" > /etc/ld.so.conf.d/cuda.conf && ldconfig
 
 RUN mkdir -p /results
 
