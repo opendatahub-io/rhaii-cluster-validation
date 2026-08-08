@@ -90,6 +90,7 @@ COPY --from=builder /usr/lib64/libibverbs/ /usr/lib64/libibverbs/
 
 # Copy rdma-core utilities
 COPY --from=builder /usr/bin/ibv_devinfo /usr/bin/ibv_devices /usr/bin/ibv_rc_pingpong /usr/bin/
+COPY --from=builder /usr/sbin/ibstat /usr/sbin/
 
 # Copy libfabric shared library and fi_info utility
 COPY --from=builder /usr/lib64/libfabric* /usr/lib64/

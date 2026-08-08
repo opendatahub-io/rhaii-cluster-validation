@@ -95,6 +95,7 @@ COPY --from=builder /usr/lib64/libibverbs/ /usr/lib64/libibverbs/
 
 # Copy rdma-core utilities (ibv_rc_pingpong is from libibverbs/examples)
 COPY --from=builder /usr/bin/ibv_devinfo /usr/bin/ibv_devices /usr/bin/ibv_rc_pingpong /usr/bin/
+COPY --from=builder /usr/sbin/ibstat /usr/sbin/
 
 # Copy libfabric shared library and utilities (fi_info)
 COPY --from=builder /usr/lib64/libfabric* /usr/lib64/
