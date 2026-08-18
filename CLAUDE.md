@@ -39,7 +39,7 @@ The binary runs in two modes controlled by subcommands:
 
 ### Key Interfaces
 
-- **`checks.Check`** (`pkg/checks/check.go`): Per-node check (gpu driver, ECC, RDMA devices, topology). Returns `checks.Result` with Status (PASS/WARN/FAIL/SKIP).
+- **`checks.Check`** (`pkg/checks/check.go`): Per-node check. Returns `checks.Result` with Status (PASS/WARN/FAIL/SKIP). Implementations live in `pkg/checks/gpu/`, `pkg/checks/rdma/`, `pkg/checks/networking/`, `pkg/checks/crd/`, `pkg/checks/operator/`.
 
 - **`jobrunner.Job`** (`pkg/jobrunner/job.go`): Multi-node test (iperf3, ib_write_bw, ibv_rc_pingpong). Produces server/client K8s Job specs, parses stdout into `JobResult`. Optional interfaces: `Configurable`, `ThresholdConfigurable`, `ImageConfigurable`, `NameSuffixable`.
 
@@ -47,15 +47,15 @@ The binary runs in two modes controlled by subcommands:
 
 1. Cleanup previous runs
 2. Ensure namespace + RBAC (+ SCC on OpenShift)
-3. Detect platform, create/load config ConfigMap
+3. Detect platform, create/load config ConfigMap — if the ConfigMap already exists it is used as-is and never overwritten; delete it to reset to platform defaults
 4. Tier 1: CRD + operator health checks (API-only, no pods)
 5. Discover GPU nodes (label-based, fallback to allocatable scan)
 6. Deploy per-node GPU check Jobs (request all GPUs for nvidia-smi)
 7. Deploy per-node RDMA node check Jobs (topology, devices, NIC status)
-   - If flat PCIe topology detected: run intra-host BW probe to find optimal GPU-NIC pairs
-8. Run pingmesh RDMA connectivity mesh (pairwise ibv_rc_pingpong)
-9. Run multi-node bandwidth jobs (ring/star topology via jobrunner)
-10. Store JSON report in ConfigMap, print, cleanup
+   - If flat PCIe topology detected (PairingNUMAAffinity): run intra-host BW probe (one Job per flat node) to find optimal GPU-NIC pairs via measured loopback bandwidth; replace pairing with `PairingBandwidthProbe`
+8. Run pingmesh RDMA connectivity mesh (pairwise ibv_rc_pingpong); classifies each NIC pair as rail (same rail index) or xrail (different rail)
+9. Run multi-node bandwidth jobs (ring/star topology via jobrunner); RDMA jobs expanded per GPU-NIC pair from topology — one `RDMABandwidthJob` per pair (PD) plus one `RDMAWEPJob` (whole-endpoint, if 2+ unique NICs)
+10. Store JSON report in ConfigMap `rhaii-validate-report` with merging (preserves fields this run didn't produce), print, cleanup
 
 ### Two Job Types
 
@@ -68,7 +68,7 @@ The binary runs in two modes controlled by subcommands:
 
 ### Container Images
 
-Two images, resolved from `manifests/image-references/image-references.yaml` (embedded via `//go:embed`):
+Two images, resolved from `manifests/image-references/image-references.yaml` (embedded via `//go:embed` in `manifests/image-references/embed.go`):
 - **Validator** (`RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR`): This binary. Used for per-node checks and TCP latency.
 - **Tools** (`RELATED_IMAGE_RHAII_VALIDATOR_TOOLS`): iperf3, ib_write_bw, ibv_rc_pingpong for network/RDMA jobs.
 
@@ -78,9 +78,13 @@ Override with env vars or CLI flags (`--image`, `--tools-image`).
 
 Embedded per-platform YAML in `pkg/config/platforms/`. Only configurable values — everything else is auto-detected. Loaded at startup, can be overridden via ConfigMap (`rhaii-validate-config`) in the cluster. Key configurable fields: `gpu.min_driver_version`, `jobs.requests/limits` (including RDMA resources), `thresholds.*`, `jobs.rdma_type`.
 
+### Embedded Manifests
+
+- `deploy/embed.go` embeds `deploy/node-check-job.yaml` (per-node Job template) and `deploy/rbac.yaml` (ServiceAccount, ClusterRole, ClusterRoleBinding) as byte slices. The controller clones the Job template and mutates per-node fields before creating; RBAC resources are applied from the embedded YAML each run.
+
 ### Report Storage
 
-JSON report stored in ConfigMap `rhaii-validate-report`. Supports report merging: runs that don't produce certain sections (e.g., `rdma-ping` doesn't produce Nodes) preserve data from previous runs.
+JSON report stored in ConfigMap `rhaii-validate-report`. Supports report merging: runs that don't produce certain sections (e.g., `rdma-ping` doesn't produce Nodes) preserve data from previous runs. Pingmesh failures go to a separate ConfigMap `rhaii-validate-pingmesh-failures` (deleted on full pass).
 
 ## CLI Subcommands
 
@@ -89,15 +93,15 @@ gpu              GPU hardware checks (driver, ECC)
 network          TCP bandwidth + latency (iperf3, tcp-lat)
 rdma             All RDMA: rdma-node + rdma-ping + rdma-bandwidth
 rdma-node        Per-node RDMA checks (devices, status, topology)
-rdma-ping        RDMA connectivity mesh (ibv_rc_pingpong)
-rdma-bandwidth   RDMA bandwidth (ib_write_bw)
+rdma-ping        RDMA connectivity mesh (ibv_rc_pingpong); requires prior rdma-node run
+rdma-bandwidth   RDMA bandwidth (ib_write_bw); requires prior rdma-node run
 all              Everything (deps + gpu + network + rdma)
 deps             CRDs + operator health (no pods deployed)
 clean            Remove validation resources
 run              (hidden) Agent mode for per-node Jobs
 ```
 
-Common flags: `--debug`, `-o json`, `--image`, `--tools-image`, `--namespace`, `--nodes`, `--server-node`, `--pull-secret`.
+Common flags: `--debug` (keep pods alive for `kubectl exec`/logs), `-o json`, `--image`, `--tools-image`, `--namespace`, `--nodes`, `--server-node`, `--pull-secret`.
 
 ## Coding Conventions
 
@@ -107,8 +111,8 @@ Common flags: `--debug`, `-o json`, `--image`, `--tools-image`, `--namespace`, `
 - Deploy manifests embedded via `//go:embed` (not read from filesystem)
 - `run` subcommand is hidden and internal — only used by per-node Job pods
 - Agent JSON report goes to stdout, progress to stderr — container runtimes merge both in `kubectl logs`, so the controller skips lines until it finds `{`
-- RDMA bandwidth jobs are expanded per GPU-NIC pair from topology (not one job per node)
-- Pingmesh uses N-choose-2 pairwise scheduling with round-robin tournament and 3 controller-managed retries
+- RDMA bandwidth jobs are expanded per GPU-NIC pair from topology (not one job per node); WEP job added if 2+ unique NICs
+- Pingmesh uses N-choose-2 pairwise scheduling with round-robin tournament and 3 controller-managed retries; rail vs xrail classification based on pair position index in each node's topology
 - GPU vendor is always auto-detected (never configured)
 - RDMA resource (e.g., `rdma/ib`, `nvidia.com/roce`) must be manually configured in platform config
 
