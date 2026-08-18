@@ -91,9 +91,9 @@ func TestBandwidthThresholdLogic(t *testing.T) {
 	}{
 		{30.0, "pass"},
 		{25.0, "pass"},
-		{15.0, "warn"},  // 60% of 25 = pass threshold, but 15 >= 10 (40%)
-		{10.0, "warn"},  // exactly 40%
-		{9.9, "fail"},   // below 40%
+		{15.0, "warn"}, // 60% of 25 = pass threshold, but 15 >= 10 (40%)
+		{10.0, "warn"}, // exactly 40%
+		{9.9, "fail"},  // below 40%
 		{0.0, "fail"},
 	}
 

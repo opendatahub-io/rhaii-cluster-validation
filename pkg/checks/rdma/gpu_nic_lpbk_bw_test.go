@@ -130,9 +130,9 @@ func TestParseLoopbackBWOutput(t *testing.T) {
 			want: 2,
 		},
 		{
-			name: "with error entries",
+			name:  "with error entries",
 			input: `{"results":[{"gpu_id":0,"nic_dev":"mlx5_0","bw_gbps":427.09},{"gpu_id":1,"nic_dev":"mlx5_0","bw_gbps":0,"error":"timeout after 30s"}]}`,
-			want: 2,
+			want:  2,
 		},
 		{
 			name: "ib_write_bw output mixed in",

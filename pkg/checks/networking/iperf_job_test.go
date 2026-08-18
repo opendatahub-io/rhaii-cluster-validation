@@ -15,11 +15,11 @@ func TestIperfJobParseResult(t *testing.T) {
 		bps        float64
 		wantStatus checks.Status
 	}{
-		{"above pass", 5.0, 1.0, 10e9, checks.StatusPass},      // 10 Gbps >= 5 pass
-		{"at pass", 5.0, 1.0, 5e9, checks.StatusPass},          // 5 Gbps >= 5 pass
-		{"warn range", 5.0, 1.0, 3e9, checks.StatusWarn},       // 3 Gbps >= 1 warn, < 5 pass
-		{"at warn", 5.0, 1.0, 1e9, checks.StatusWarn},          // 1 Gbps >= 1 warn
-		{"below warn", 5.0, 1.0, 0.5e9, checks.StatusFail},     // 0.5 Gbps < 1 warn
+		{"above pass", 5.0, 1.0, 10e9, checks.StatusPass},  // 10 Gbps >= 5 pass
+		{"at pass", 5.0, 1.0, 5e9, checks.StatusPass},      // 5 Gbps >= 5 pass
+		{"warn range", 5.0, 1.0, 3e9, checks.StatusWarn},   // 3 Gbps >= 1 warn, < 5 pass
+		{"at warn", 5.0, 1.0, 1e9, checks.StatusWarn},      // 1 Gbps >= 1 warn
+		{"below warn", 5.0, 1.0, 0.5e9, checks.StatusFail}, // 0.5 Gbps < 1 warn
 		{"zero bandwidth", 5.0, 1.0, 0, checks.StatusFail},
 		{"high bandwidth", 100.0, 10.0, 200e9, checks.StatusPass},
 	}

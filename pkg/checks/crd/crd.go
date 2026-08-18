@@ -49,9 +49,9 @@ type CRDSpec struct {
 // RequiredCRDs lists the CRDs required for llm-d deployment (design doc §5.2).
 var RequiredCRDs = []CRDSpec{
 	{
-		Name:                  "gateways.gateway.networking.k8s.io",
-		Description:           "Gateway API (Gateways)",
-		Remediation:           "Install the Gateway API CRDs: kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml",
+		Name:                   "gateways.gateway.networking.k8s.io",
+		Description:            "Gateway API (Gateways)",
+		Remediation:            "Install the Gateway API CRDs: kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml",
 		ReleaseVersionJSONPath: `{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}`,
 	},
 	{

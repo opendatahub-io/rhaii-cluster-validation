@@ -39,12 +39,12 @@ type NodePair struct {
 
 // Runner orchestrates server/client job lifecycle for multi-node tests.
 type Runner struct {
-	client    kubernetes.Interface
-	namespace string
-	image     string
-	timeout   time.Duration
-	output    io.Writer
-	debug     bool
+	client        kubernetes.Interface
+	namespace     string
+	image         string
+	timeout       time.Duration
+	output        io.Writer
+	debug         bool
 	quietProgress bool // suppress polling/completion output (used by RunPairwise)
 }
 
@@ -147,11 +147,11 @@ func (r *Runner) RunPairwise(ctx context.Context, jobs map[NodePair]Job, maxAtte
 					quietProgress: true,
 				}
 
-			for attempt := 1; attempt <= maxAttempts; attempt++ {
-				if ctx.Err() != nil {
-					break
-				}
-				if ns, ok := j.(NameSuffixable); ok {
+				for attempt := 1; attempt <= maxAttempts; attempt++ {
+					if ctx.Err() != nil {
+						break
+					}
+					if ns, ok := j.(NameSuffixable); ok {
 						ns.SetNameSuffix(fmt.Sprintf("r%da%d", ri+1, attempt))
 					}
 

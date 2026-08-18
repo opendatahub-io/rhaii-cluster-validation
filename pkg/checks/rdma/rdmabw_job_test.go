@@ -8,10 +8,10 @@ import (
 
 func TestParseIBWriteBW(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
+		name     string
+		input    string
 		wantGbps float64
-		wantErr bool
+		wantErr  bool
 	}{
 		{
 			name: "typical output",

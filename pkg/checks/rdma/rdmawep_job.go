@@ -80,10 +80,10 @@ func (j *RDMAWEPJob) SetThreshold(pass, warn float64) {
 	j.WarnThreshold = warn
 }
 
-func (j *RDMAWEPJob) GetServerImage() string          { return j.ServerImage }
-func (j *RDMAWEPJob) GetClientImage() string          { return j.ClientImage }
-func (j *RDMAWEPJob) SetServerImage(img string)       { j.ServerImage = img }
-func (j *RDMAWEPJob) SetClientImage(img string)       { j.ClientImage = img }
+func (j *RDMAWEPJob) GetServerImage() string    { return j.ServerImage }
+func (j *RDMAWEPJob) GetClientImage() string    { return j.ClientImage }
+func (j *RDMAWEPJob) SetServerImage(img string) { j.ServerImage = img }
+func (j *RDMAWEPJob) SetClientImage(img string) { j.ClientImage = img }
 
 // buildScript generates a bash script that runs ib_write_bw on all NICs in parallel.
 // Server: starts ib_write_bw on each NIC with different ports.
@@ -182,8 +182,8 @@ func (j *RDMAWEPJob) ParseResult(logs string) (*jobrunner.JobResult, error) {
 	r := &jobrunner.JobResult{
 		Details: map[string]any{
 			"aggregate_bandwidth_gbps": fmt.Sprintf("%.1f", totalGbps),
-			"nic_count":               nicCount,
-			"per_nic_avg_gbps":        fmt.Sprintf("%.1f", totalGbps/float64(nicCount)),
+			"nic_count":                nicCount,
+			"per_nic_avg_gbps":         fmt.Sprintf("%.1f", totalGbps/float64(nicCount)),
 		},
 	}
 

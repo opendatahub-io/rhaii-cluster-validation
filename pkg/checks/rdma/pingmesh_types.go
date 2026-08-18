@@ -26,7 +26,7 @@ type PingMeshPairResult struct {
 // Detailed failures go to a separate ConfigMap to avoid size bloat.
 type PingMeshReport struct {
 	Summary map[string]PingMeshCheckSummary `json:"summary"`
-	Matrix  []PingMeshNodePair             `json:"matrix"`
+	Matrix  []PingMeshNodePair              `json:"matrix"`
 }
 
 // PingMeshCheckSummary represents one of the two aggregate checks (rail / xrail).
@@ -54,8 +54,8 @@ type PingMeshCount struct {
 
 // PingMeshFailuresReport is stored in a separate ConfigMap (only when failures exist).
 type PingMeshFailuresReport struct {
-	Timestamp time.Time          `json:"timestamp"`
-	Failures  []PingMeshFailure  `json:"failures"`
+	Timestamp time.Time         `json:"timestamp"`
+	Failures  []PingMeshFailure `json:"failures"`
 }
 
 // PingMeshFailure records a single NIC pair that failed connectivity.
