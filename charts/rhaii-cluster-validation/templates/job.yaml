@@ -19,9 +19,15 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "rhaii.serviceAccountName" . }}
-      {{- with .Values.imagePullSecrets }}
+      {{- $pullSecret := include "rhaii.pullSecretName" . }}
+      {{- if or $pullSecret .Values.imagePullSecrets }}
       imagePullSecrets:
+        {{- if $pullSecret }}
+        - name: {{ $pullSecret }}
+        {{- end }}
+        {{- with .Values.imagePullSecrets }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:
@@ -63,9 +69,9 @@ spec:
             - "--client-nodes"
             - {{ join "," . | quote }}
             {{- end }}
-            {{- if .Values.pullSecret }}
+            {{- if $pullSecret }}
             - "--pull-secret"
-            - {{ .Values.pullSecret | quote }}
+            - {{ $pullSecret | quote }}
             {{- end }}
             {{- if .Values.debug }}
             - "--debug"

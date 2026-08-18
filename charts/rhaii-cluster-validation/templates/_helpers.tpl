@@ -41,3 +41,16 @@ serviceAccount.name is empty.
 {{- define "rhaii.serviceAccountName" -}}
 {{- default (include "rhaii.fullname" .) .Values.serviceAccount.name -}}
 {{- end -}}
+
+{{/*
+Effective image-pull Secret name. If dockerConfigJson is provided the chart
+creates the Secret (name defaults to "<fullname>-pull"); otherwise it returns
+pullSecret.name (an existing Secret to reference), or "" if unset.
+*/}}
+{{- define "rhaii.pullSecretName" -}}
+{{- if .Values.pullSecret.dockerConfigJson -}}
+{{- default (printf "%s-pull" (include "rhaii.fullname" .)) .Values.pullSecret.name -}}
+{{- else -}}
+{{- .Values.pullSecret.name -}}
+{{- end -}}
+{{- end -}}

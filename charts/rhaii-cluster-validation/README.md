@@ -51,6 +51,37 @@ helm install rhaii-validate ./charts/rhaii-cluster-validation \
   --set openshift.enabled=true
 ```
 
+### Pulling images from registry.redhat.io
+
+The Red Hat catalog images (and any private registry) need a pull secret. The
+chart applies one secret to both the controller image and the check Jobs.
+
+Easiest — hand the chart your docker login and it creates the secret for you:
+
+```bash
+podman login registry.redhat.io   # writes ${XDG_RUNTIME_DIR}/containers/auth.json
+
+helm install rhaii-validate ./charts/rhaii-cluster-validation \
+  --set image.validator=registry.redhat.io/rhoai/odh-rhaii-cluster-validator-rhel9:v3.4.0 \
+  --set image.tools=registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0 \
+  --set-file pullSecret.dockerConfigJson=${XDG_RUNTIME_DIR}/containers/auth.json
+```
+
+Or reference a secret you already created:
+
+```bash
+kubectl create namespace rhaii-validation
+kubectl create secret docker-registry rhaii-pull \
+  --docker-server=registry.redhat.io \
+  --docker-username='<user>' --docker-password='<token>' \
+  -n rhaii-validation
+
+helm install rhaii-validate ./charts/rhaii-cluster-validation \
+  --set image.validator=registry.redhat.io/rhoai/odh-rhaii-cluster-validator-rhel9:v3.4.0 \
+  --set image.tools=registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0 \
+  --set pullSecret.name=rhaii-pull
+```
+
 Uninstall (removes the Job, SA, and RBAC; see
 [cleanup](#cleanup-vs-helm-uninstall)):
 
@@ -72,7 +103,8 @@ helm uninstall rhaii-validate
 | `timeout` | `""` | Check timeout, e.g. `5m`. Empty → built-in default. |
 | `nodes` | `[]` | Restrict to specific GPU nodes. |
 | `serverNode` / `clientNodes` | `""` / `[]` | Pin topology for network/rdma/bandwidth. |
-| `pullSecret` | `""` | Existing image-pull Secret to attach to the workload SA. |
+| `pullSecret.dockerConfigJson` | `""` | docker config.json contents. When set, the chart **creates** a pull Secret and applies it to BOTH the controller Job (`imagePullSecrets`) and the check Jobs (via `--pull-secret`). Use `--set-file`. |
+| `pullSecret.name` | `""` | Reference an existing docker-registry Secret (when `dockerConfigJson` is empty), or override the generated name (default `<release>-pull`) when creating. |
 | `debug` | `false` | Keep check Jobs/pods alive after the run. |
 | `platformConfigYAML` | `""` | Verbatim platform config written to the `rhaii-validate-config` ConfigMap. Ignored if that ConfigMap already exists. |
 | `imagePullSecrets` | `[]` | Secrets to pull the controller image itself. |

@@ -43,10 +43,22 @@ nodes: []
 serverNode: ""
 clientNodes: []
 
-# Name of an existing image-pull Secret (type kubernetes.io/dockerconfigjson,
-# in namespace.name) to attach to the workload ServiceAccount the controller
-# creates for check Jobs.
-pullSecret: ""
+# Image-pull Secret used to pull images from a private/authenticated registry
+# such as registry.redhat.io. It is applied in BOTH places that pull images:
+#   - the controller Job's imagePullSecrets (to pull the controller image), and
+#   - passed to the controller via --pull-secret so it attaches the secret to
+#     the workload ServiceAccount for the per-node/multi-node check Jobs.
+pullSecret:
+  # To CREATE a pull secret, just provide its docker config.json contents (the
+  # chart creates the Secret and wires it everywhere):
+  #   --set-file pullSecret.dockerConfigJson=${XDG_RUNTIME_DIR}/containers/auth.json
+  # (auth.json is written by `podman login registry.redhat.io`; on Docker use
+  #  ~/.docker/config.json.)
+  dockerConfigJson: ""
+  # To REFERENCE an existing docker-registry Secret instead, set its name and
+  # leave dockerConfigJson empty. When creating, this optionally overrides the
+  # generated name (default "<release>-pull").
+  name: ""
 
 # Keep check Jobs/pods around after the run for debugging instead of
 # cleaning them up.
@@ -59,8 +71,9 @@ debug: false
 # ConfigMap already exists in the target namespace.
 platformConfigYAML: ""
 
-# Secrets used to pull the controller image itself (distinct from
-# `pullSecret` above, which is for the check-job workload images).
+# Additional image-pull Secrets (names of existing Secrets) for the controller
+# image only. `pullSecret` above is already applied to both the controller and
+# the check Jobs; use this only for extra secrets beyond it.
 imagePullSecrets: []
 
 controller:
