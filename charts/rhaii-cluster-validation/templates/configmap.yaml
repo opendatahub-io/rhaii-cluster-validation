@@ -1,0 +1,18 @@
+{{- if .Values.platformConfigYAML }}
+# Pre-creates the platform-config ConfigMap the controller reads. The
+# controller uses an existing rhaii-validate-config as-is (it never overwrites
+# it), so this lets you pin a platform config via the chart. Remove/empty
+# platformConfigYAML to let the controller auto-detect and use its built-in
+# defaults.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rhaii-validate-config
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "rhaii.labels" . | nindent 4 }}
+    app: rhaii-validator
+data:
+  platform.yaml: |
+    {{- .Values.platformConfigYAML | nindent 4 }}
+{{- end }}

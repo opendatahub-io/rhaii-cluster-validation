@@ -1,0 +1,85 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rhaii.fullname" . }}
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "rhaii.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.controller.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ . }}
+  {{- end }}
+  # A failed validation (FAIL result → non-zero exit) is a real result, not a
+  # transient error, so don't retry.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "rhaii.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "rhaii.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: {{ .Values.image.validator | default "quay.io/opendatahub/odh-rhaii-cluster-validator:odh-stable" }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - {{ .Values.checkMode | quote }}
+            - "--namespace"
+            - {{ .Values.namespace.name | quote }}
+            {{- if .Values.outputFormat }}
+            - "-o"
+            - {{ .Values.outputFormat | quote }}
+            {{- end }}
+            {{- if .Values.timeout }}
+            - "--timeout"
+            - {{ .Values.timeout | quote }}
+            {{- end }}
+            {{- with .Values.nodes }}
+            - "--nodes"
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.serverNode }}
+            - "--server-node"
+            - {{ .Values.serverNode | quote }}
+            {{- end }}
+            {{- with .Values.clientNodes }}
+            - "--client-nodes"
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.pullSecret }}
+            - "--pull-secret"
+            - {{ .Values.pullSecret | quote }}
+            {{- end }}
+            {{- if .Values.debug }}
+            - "--debug"
+            {{- end }}
+          env:
+            {{- if .Values.image.validator }}
+            - name: RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR
+              value: {{ .Values.image.validator | quote }}
+            {{- end }}
+            {{- if .Values.image.tools }}
+            - name: RELATED_IMAGE_RHAII_VALIDATOR_TOOLS
+              value: {{ .Values.image.tools | quote }}
+            {{- end }}
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
