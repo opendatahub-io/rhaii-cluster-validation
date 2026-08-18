@@ -1,0 +1,93 @@
+# Default values for rhaii-cluster-validation.
+#
+# This chart runs the rhaii-validator controller itself as an in-cluster Job
+# (useful for CI/GitOps pipelines with no interactive kubectl session). It
+# does not replace `kubectl rhaii-validate`, which remains the primary way to
+# run validation from an operator's machine.
+#
+# The controller Job self-provisions everything it needs in `namespace.name`
+# (a workload ServiceAccount, per-node check Jobs, etc.) exactly as it does
+# when run via kubectl — this chart only adds the RBAC and Job needed to run
+# the controller binary itself inside the cluster.
+
+namespace:
+  # Namespace where validation resources (Jobs, RBAC, the stored report) are
+  # created. The controller creates this namespace itself if missing, so
+  # `create: false` only matters if you manage the namespace separately.
+  name: rhaii-validation
+  create: true
+
+# Which validation subcommand to run:
+# gpu | network | rdma | rdma-node | rdma-ping | rdma-bandwidth | all | deps
+checkMode: all
+
+image:
+  # Leave empty to use the embedded defaults from
+  # manifests/image-references/image-references.yaml.
+  validator: ""
+  tools: ""
+  pullPolicy: IfNotPresent
+
+# Output format for the controller's own log output: table or json.
+outputFormat: table
+
+# Timeout for checks, e.g. "5m". Empty uses the built-in default (5m).
+timeout: ""
+
+# Restrict validation to specific GPU nodes (default: all discovered GPU nodes).
+nodes: []
+
+# For network/rdma/rdma-bandwidth/all: pin the server node and/or client
+# nodes (default: ring topology across all GPU nodes). Ignored for check
+# modes that don't support it (gpu, rdma-node, rdma-ping, deps).
+serverNode: ""
+clientNodes: []
+
+# Name of an existing image-pull Secret (type kubernetes.io/dockerconfigjson,
+# in namespace.name) to attach to the workload ServiceAccount the controller
+# creates for check Jobs.
+pullSecret: ""
+
+# Keep check Jobs/pods around after the run for debugging instead of
+# cleaning them up.
+debug: false
+
+# Optional platform config override, written verbatim as the "platform.yaml"
+# key of the rhaii-validate-config ConfigMap before the controller runs.
+# Leave empty to let the controller auto-detect the platform and use its
+# built-in defaults (see pkg/config/platforms/*.yaml). Ignored if the
+# ConfigMap already exists in the target namespace.
+platformConfigYAML: ""
+
+# Secrets used to pull the controller image itself (distinct from
+# `pullSecret` above, which is for the check-job workload images).
+imagePullSecrets: []
+
+controller:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # How long Kubernetes keeps the finished controller Job around.
+  ttlSecondsAfterFinished: 86400
+
+serviceAccount:
+  create: true
+  # Defaults to a name derived from the release name if empty.
+  name: ""
+
+rbac:
+  create: true
+
+# OpenShift-specific: creating the privileged SCC binding for the workload
+# ServiceAccount (needed for host sysfs visibility on check Jobs) requires
+# the controller's own ServiceAccount to have the RBAC "bind" verb on the
+# system:openshift:scc:privileged ClusterRole. Only needed on OpenShift.
+openshift:
+  enabled: false
