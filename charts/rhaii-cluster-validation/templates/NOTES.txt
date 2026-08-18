@@ -1,17 +1,17 @@
 rhaii-cluster-validation is running the "{{ .Values.checkMode }}" check as an
-in-cluster Job in namespace "{{ .Values.namespace.name }}".
+in-cluster Job in namespace "{{ .Release.Namespace }}".
 
 1. Watch the controller Job:
 
-   kubectl get job {{ include "rhaii.fullname" . }} -n {{ .Values.namespace.name }} -w
+   kubectl get job {{ include "rhaii.fullname" . }} -n {{ .Release.Namespace }} -w
 
 2. Follow the controller logs (the human-readable report + progress):
 
-   kubectl logs -f job/{{ include "rhaii.fullname" . }} -n {{ .Values.namespace.name }}
+   kubectl logs -f job/{{ include "rhaii.fullname" . }} -n {{ .Release.Namespace }}
 
 3. Read the stored JSON report after it completes:
 
-   kubectl get cm rhaii-validate-report -n {{ .Values.namespace.name }} \
+   kubectl get cm rhaii-validate-report -n {{ .Release.Namespace }} \
      -o jsonpath='{.data.report\.json}' | jq .
 
 The behavior is identical to running `kubectl rhaii-validate {{ .Values.checkMode }}`

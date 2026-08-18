@@ -13,23 +13,37 @@ the stored report ConfigMap) exactly as it does when run via kubectl.
 
 ## What it deploys
 
-- A controller **Job** running `rhaii-validator <checkMode>` in `namespace.name`.
+All resources are created in the Helm **release namespace** (set with
+`--namespace <ns> --create-namespace`):
+
+- A controller **Job** running `rhaii-validator <checkMode>`.
 - A **ServiceAccount** for that Job.
 - A **ClusterRole + ClusterRoleBinding** granting the controller the API access
   it needs (see [RBAC](#rbac) — this is deliberately **not** cluster-admin).
-- Optionally a **Namespace** (`namespace.create`) and a platform-config
-  **ConfigMap** (`platformConfigYAML`).
+- Optionally a platform-config **ConfigMap** (`platformConfigYAML`) and an image
+  **pull Secret** (`pullSecret`).
 
 ## Quick start
 
+Install from an OCI registry (once published):
+
 ```bash
-# From the repo root. Runs the "all" check with upstream odh-stable images.
-helm install rhaii-validate ./charts/rhaii-cluster-validation
+helm upgrade --install rhaii oci://quay.io/aneeshkp/charts/rhaii-cluster-validation \
+  --version 0.1.0 \
+  --namespace rhaii-validation --create-namespace
+```
 
-# Follow the report/progress
-kubectl logs -f job/rhaii-validate-rhaii-cluster-validation -n rhaii-validation
+Or from a local checkout:
 
-# Read the stored JSON report after completion
+```bash
+helm upgrade --install rhaii ./charts/rhaii-cluster-validation \
+  --namespace rhaii-validation --create-namespace
+```
+
+Then watch it:
+
+```bash
+kubectl logs -f job/rhaii-rhaii-cluster-validation -n rhaii-validation
 kubectl get cm rhaii-validate-report -n rhaii-validation \
   -o jsonpath='{.data.report\.json}' | jq .
 ```
@@ -37,7 +51,8 @@ kubectl get cm rhaii-validate-report -n rhaii-validation \
 Run a specific check and pin locally built images:
 
 ```bash
-helm install rhaii-validate ./charts/rhaii-cluster-validation \
+helm upgrade --install rhaii ./charts/rhaii-cluster-validation \
+  --namespace rhaii-validation --create-namespace \
   --set checkMode=rdma \
   --set image.validator=quay.io/<user>/odh-rhaii-cluster-validator:latest \
   --set image.tools=quay.io/<user>/odh-rhaii-validator-tools:latest
@@ -47,9 +62,14 @@ On OpenShift (grants the controller `bind` on the privileged SCC so it can set
 up check-Job host access):
 
 ```bash
-helm install rhaii-validate ./charts/rhaii-cluster-validation \
+helm upgrade --install rhaii ./charts/rhaii-cluster-validation \
+  --namespace rhaii-validation --create-namespace \
   --set openshift.enabled=true
 ```
+
+> Note: the `deps` check is API-only and always uses the `rhaii-validation`
+> namespace for its stored report (it doesn't take `--namespace`). For `deps`,
+> install into `--namespace rhaii-validation` so everything lines up.
 
 ### Pulling images from registry.redhat.io
 
@@ -76,7 +96,8 @@ kubectl create secret docker-registry rhaii-pull \
   --docker-username='<user>' --docker-password='<token>' \
   -n rhaii-validation
 
-helm install rhaii-validate ./charts/rhaii-cluster-validation \
+helm upgrade --install rhaii ./charts/rhaii-cluster-validation \
+  --namespace rhaii-validation --create-namespace \
   --set image.validator=registry.redhat.io/rhoai/odh-rhaii-cluster-validator-rhel9:v3.4.0 \
   --set image.tools=registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0 \
   --set pullSecret.name=rhaii-pull
@@ -86,15 +107,16 @@ Uninstall (removes the Job, SA, and RBAC; see
 [cleanup](#cleanup-vs-helm-uninstall)):
 
 ```bash
-helm uninstall rhaii-validate
+helm uninstall rhaii -n rhaii-validation
 ```
 
 ## Values
 
+Resources are created in the Helm release namespace (`--namespace`), so there is
+no namespace value.
+
 | Key | Default | Description |
 |-----|---------|-------------|
-| `namespace.name` | `rhaii-validation` | Namespace for all validation resources. |
-| `namespace.create` | `true` | Create the namespace (controller also creates it if missing). |
 | `checkMode` | `all` | Subcommand: `gpu`, `network`, `rdma`, `rdma-node`, `rdma-ping`, `rdma-bandwidth`, `all`, `deps`. |
 | `image.validator` | `""` | Controller/validator image. Empty → `quay.io/opendatahub/odh-rhaii-cluster-validator:odh-stable`. |
 | `image.tools` | `""` | Tools image (iperf3/RDMA). Empty → embedded default. |
@@ -143,14 +165,14 @@ Creating an empty ClusterRole grants no permissions, so the controller needs
 
 ## Cleanup vs helm uninstall
 
-`helm uninstall` removes the chart-managed resources (controller Job, SA, RBAC,
-and any chart-created namespace/ConfigMap). It does **not** run the validator's
-own `clean`, so resources the controller created at runtime — the workload
-ServiceAccount, the per-run check Jobs, and the stored report/config
-ConfigMaps — may remain. To remove those:
+`helm uninstall rhaii -n <ns>` removes the chart-managed resources (controller
+Job, SA, RBAC, ConfigMap). It does **not** run the validator's own `clean`, so
+resources the controller created at runtime — the workload ServiceAccount, the
+per-run check Jobs, and the stored report/config ConfigMaps — may remain. To
+remove those:
 
 ```bash
-kubectl rhaii-validate clean -n rhaii-validation
+kubectl rhaii-validate clean -n <ns>
 # or delete the namespace entirely:
-kubectl delete namespace rhaii-validation
+kubectl delete namespace <ns>
 ```

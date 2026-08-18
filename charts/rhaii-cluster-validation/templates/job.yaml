@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "rhaii.fullname" . }}
-  namespace: {{ .Values.namespace.name }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "rhaii.labels" . | nindent 4 }}
 spec:
@@ -47,8 +47,15 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - {{ .Values.checkMode | quote }}
+            {{- if eq .Values.checkMode "deps" }}
+            {{- /* deps is API-only: it accepts only -o/--output (and --config/--kubeconfig). */}}
+            {{- if .Values.outputFormat }}
+            - "-o"
+            - {{ .Values.outputFormat | quote }}
+            {{- end }}
+            {{- else }}
             - "--namespace"
-            - {{ .Values.namespace.name | quote }}
+            - {{ .Release.Namespace | quote }}
             {{- if .Values.outputFormat }}
             - "-o"
             - {{ .Values.outputFormat | quote }}
@@ -61,6 +68,8 @@ spec:
             - "--nodes"
             - {{ join "," . | quote }}
             {{- end }}
+            {{- /* only these check modes accept --server-node/--client-nodes */}}
+            {{- if has .Values.checkMode (list "network" "rdma" "rdma-bandwidth" "all") }}
             {{- if .Values.serverNode }}
             - "--server-node"
             - {{ .Values.serverNode | quote }}
@@ -69,12 +78,14 @@ spec:
             - "--client-nodes"
             - {{ join "," . | quote }}
             {{- end }}
+            {{- end }}
             {{- if $pullSecret }}
             - "--pull-secret"
             - {{ $pullSecret | quote }}
             {{- end }}
             {{- if .Values.debug }}
             - "--debug"
+            {{- end }}
             {{- end }}
           env:
             {{- if .Values.image.validator }}

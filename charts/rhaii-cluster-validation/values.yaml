@@ -5,17 +5,14 @@
 # does not replace `kubectl rhaii-validate`, which remains the primary way to
 # run validation from an operator's machine.
 #
-# The controller Job self-provisions everything it needs in `namespace.name`
-# (a workload ServiceAccount, per-node check Jobs, etc.) exactly as it does
-# when run via kubectl — this chart only adds the RBAC and Job needed to run
-# the controller binary itself inside the cluster.
-
-namespace:
-  # Namespace where validation resources (Jobs, RBAC, the stored report) are
-  # created. The controller creates this namespace itself if missing, so
-  # `create: false` only matters if you manage the namespace separately.
-  name: rhaii-validation
-  create: true
+# The controller Job self-provisions everything it needs in the release
+# namespace (a workload ServiceAccount, per-node check Jobs, etc.) exactly as
+# it does when run via kubectl — this chart only adds the RBAC and Job needed
+# to run the controller binary itself inside the cluster.
+#
+# All resources are created in the Helm release namespace. Set it with
+# `--namespace <ns> --create-namespace`, e.g.:
+#   helm upgrade --install rhaii <chart> --namespace rhaii --create-namespace
 
 # Which validation subcommand to run:
 # gpu | network | rdma | rdma-node | rdma-ping | rdma-bandwidth | all | deps

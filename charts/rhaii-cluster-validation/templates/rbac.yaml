@@ -80,7 +80,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: {{ include "rhaii.serviceAccountName" . }}
-    namespace: {{ .Values.namespace.name }}
+    namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
   name: {{ include "rhaii.fullname" . }}
