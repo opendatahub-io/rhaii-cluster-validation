@@ -89,9 +89,9 @@ type NICInfo struct {
 // nic_dev, nic_numa, pcie_hops) to avoid repeating data already present
 // in gpu_list/nic_list.
 type GPUNICPair struct {
-	GPU            GPUInfo
-	NIC            NICInfo
-	PCIeHops       int
+	GPU             GPUInfo
+	NIC             NICInfo
+	PCIeHops        int
 	IntrahostBWGbps float64 // Measured intra-host loopback bandwidth; 0 means not measured.
 }
 
@@ -118,12 +118,12 @@ func (p GPUNICPair) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON reconstructs a GPUNICPair from slim JSON.
 func (p *GPUNICPair) UnmarshalJSON(data []byte) error {
 	var slim struct {
-		GPUID           int      `json:"gpu_id"`
-		GPUNUMA         int      `json:"gpu_numa"`
-		NICDev          string   `json:"nic_dev"`
-		NICNUMA         int      `json:"nic_numa"`
-		PCIeHops        int      `json:"pcie_hops"`
-		IntrahostBWGbps float64  `json:"intrahost_bandwidth_gbps"`
+		GPUID           int     `json:"gpu_id"`
+		GPUNUMA         int     `json:"gpu_numa"`
+		NICDev          string  `json:"nic_dev"`
+		NICNUMA         int     `json:"nic_numa"`
+		PCIeHops        int     `json:"pcie_hops"`
+		IntrahostBWGbps float64 `json:"intrahost_bandwidth_gbps"`
 	}
 	if err := json.Unmarshal(data, &slim); err != nil {
 		return err
@@ -199,4 +199,32 @@ func ExtractTopology(report NodeReport) *NodeTopology {
 		}
 	}
 	return nil
+}
+
+// MergeNodeReports combines reports from multiple phases (e.g. GPU checks and
+// RDMA node checks) into a single slice, one entry per node. Reports for the
+// same node (matched across reportSets) are merged by appending Results;
+// node order follows first appearance.
+func MergeNodeReports(reportSets ...[]NodeReport) []NodeReport {
+	byNode := make(map[string]*NodeReport)
+	var order []string
+
+	for _, reports := range reportSets {
+		for _, r := range reports {
+			existing, ok := byNode[r.Node]
+			if !ok {
+				copy := r
+				byNode[r.Node] = &copy
+				order = append(order, r.Node)
+			} else {
+				existing.Results = append(existing.Results, r.Results...)
+			}
+		}
+	}
+
+	var merged []NodeReport
+	for _, name := range order {
+		merged = append(merged, *byNode[name])
+	}
+	return merged
 }

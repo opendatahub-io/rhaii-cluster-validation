@@ -8,8 +8,59 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// ApplyResourceConfig parses requests/limits (string quantity maps, e.g. from
+// platform config) and merges them into container's resource requirements.
+// Existing entries in the container's Resources are preserved; entries with
+// the same resource name are overwritten. Initializes the Requests/Limits
+// maps if needed.
+func ApplyResourceConfig(container *corev1.Container, requests, limits map[string]string) error {
+	if len(requests) > 0 {
+		if container.Resources.Requests == nil {
+			container.Resources.Requests = make(corev1.ResourceList)
+		}
+		for k, v := range requests {
+			qty, err := resource.ParseQuantity(v)
+			if err != nil {
+				return fmt.Errorf("invalid resource request %q for %s: %w", v, k, err)
+			}
+			container.Resources.Requests[corev1.ResourceName(k)] = qty
+		}
+	}
+	if len(limits) > 0 {
+		if container.Resources.Limits == nil {
+			container.Resources.Limits = make(corev1.ResourceList)
+		}
+		for k, v := range limits {
+			qty, err := resource.ParseQuantity(v)
+			if err != nil {
+				return fmt.Errorf("invalid resource limit %q for %s: %w", v, k, err)
+			}
+			container.Resources.Limits[corev1.ResourceName(k)] = qty
+		}
+	}
+	return nil
+}
+
+// SetGPUResource requests count units of gpuResource on container, initializing
+// the Requests/Limits maps if needed. No-op if count <= 0 or gpuResource is empty.
+func SetGPUResource(container *corev1.Container, gpuResource corev1.ResourceName, count int64) {
+	if count <= 0 || gpuResource == "" {
+		return
+	}
+	qty := resource.MustParse(fmt.Sprintf("%d", count))
+	if container.Resources.Requests == nil {
+		container.Resources.Requests = make(corev1.ResourceList)
+	}
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = make(corev1.ResourceList)
+	}
+	container.Resources.Requests[gpuResource] = qty
+	container.Resources.Limits[gpuResource] = qty
+}
 
 // BuildJobSpec creates a base K8s Job with common settings.
 // Job implementations call this then customize the container args.

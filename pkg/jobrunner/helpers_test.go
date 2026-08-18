@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestBuildJobSpecBasic(t *testing.T) {
@@ -164,4 +165,79 @@ func TestBuildJobSpecInvalidResource(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid resource quantity")
 	}
+}
+
+func TestApplyResourceConfig(t *testing.T) {
+	container := &corev1.Container{}
+	err := ApplyResourceConfig(container, map[string]string{"cpu": "2", "memory": "4Gi"}, map[string]string{"cpu": "4"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if container.Resources.Requests.Cpu().String() != "2" {
+		t.Errorf("cpu request = %q, want %q", container.Resources.Requests.Cpu().String(), "2")
+	}
+	if container.Resources.Requests.Memory().String() != "4Gi" {
+		t.Errorf("memory request = %q, want %q", container.Resources.Requests.Memory().String(), "4Gi")
+	}
+	if container.Resources.Limits.Cpu().String() != "4" {
+		t.Errorf("cpu limit = %q, want %q", container.Resources.Limits.Cpu().String(), "4")
+	}
+}
+
+func TestApplyResourceConfig_PreservesExisting(t *testing.T) {
+	container := &corev1.Container{
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{"nvidia.com/gpu": resourceQty("2")},
+		},
+	}
+	if err := ApplyResourceConfig(container, map[string]string{"cpu": "1"}, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	gpuQty := container.Resources.Requests["nvidia.com/gpu"]
+	if gpuQty.String() != "2" {
+		t.Errorf("expected existing nvidia.com/gpu request to be preserved")
+	}
+	if container.Resources.Requests.Cpu().String() != "1" {
+		t.Errorf("cpu request = %q, want %q", container.Resources.Requests.Cpu().String(), "1")
+	}
+}
+
+func TestApplyResourceConfig_InvalidQuantity(t *testing.T) {
+	container := &corev1.Container{}
+	if err := ApplyResourceConfig(container, map[string]string{"cpu": "not-a-quantity"}, nil); err == nil {
+		t.Fatal("expected error for invalid resource quantity")
+	}
+	if err := ApplyResourceConfig(container, nil, map[string]string{"cpu": "not-a-quantity"}); err == nil {
+		t.Fatal("expected error for invalid resource limit quantity")
+	}
+}
+
+func TestSetGPUResource(t *testing.T) {
+	container := &corev1.Container{}
+	SetGPUResource(container, "nvidia.com/gpu", 8)
+	req := container.Resources.Requests["nvidia.com/gpu"]
+	if req.String() != "8" {
+		t.Errorf("gpu request = %q, want %q", req.String(), "8")
+	}
+	lim := container.Resources.Limits["nvidia.com/gpu"]
+	if lim.String() != "8" {
+		t.Errorf("gpu limit = %q, want %q", lim.String(), "8")
+	}
+}
+
+func TestSetGPUResource_NoOp(t *testing.T) {
+	container := &corev1.Container{}
+	SetGPUResource(container, "nvidia.com/gpu", 0)
+	SetGPUResource(container, "", 4)
+	if container.Resources.Requests != nil {
+		t.Errorf("expected no resources to be set, got %+v", container.Resources.Requests)
+	}
+}
+
+func resourceQty(v string) resource.Quantity {
+	q, err := resource.ParseQuantity(v)
+	if err != nil {
+		panic(err)
+	}
+	return q
 }
