@@ -25,6 +25,13 @@ image:
   tools: ""
   pullPolicy: IfNotPresent
 
+# Additional RELATED_IMAGE_* env vars set on the controller Job, for images
+# beyond validator/tools that the controller may resolve (e.g. a future NCCL
+# image). Keys are used verbatim as the env var name. Example:
+#   extraRelatedImages:
+#     RELATED_IMAGE_RHAII_NCCL: quay.io/opendatahub/odh-rhaii-nccl:odh-stable
+extraRelatedImages: {}
+
 # Output format for the controller's own log output: table or json.
 outputFormat: table
 

@@ -120,6 +120,7 @@ no namespace value.
 | `checkMode` | `all` | Subcommand: `gpu`, `network`, `rdma`, `rdma-node`, `rdma-ping`, `rdma-bandwidth`, `all`, `deps`. |
 | `image.validator` | `""` | Controller/validator image. Empty → `quay.io/opendatahub/odh-rhaii-cluster-validator:odh-stable`. |
 | `image.tools` | `""` | Tools image (iperf3/RDMA). Empty → embedded default. |
+| `extraRelatedImages` | `{}` | Map of extra `RELATED_IMAGE_*` env vars for the controller Job (keys used verbatim), for images beyond validator/tools (e.g. a future NCCL image). |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy for the controller Job. |
 | `outputFormat` | `table` | Controller log output: `table` or `json`. |
 | `timeout` | `""` | Check timeout, e.g. `5m`. Empty → built-in default. |

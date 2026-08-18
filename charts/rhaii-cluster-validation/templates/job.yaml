@@ -96,6 +96,14 @@ spec:
             - name: RELATED_IMAGE_RHAII_VALIDATOR_TOOLS
               value: {{ .Values.image.tools | quote }}
             {{- end }}
+            {{- /* Arbitrary additional RELATED_IMAGE_* overrides (e.g. a future
+                   NCCL image). Keys are used verbatim as env var names. */}}
+            {{- range $name, $value := .Values.extraRelatedImages }}
+            {{- if $value }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
