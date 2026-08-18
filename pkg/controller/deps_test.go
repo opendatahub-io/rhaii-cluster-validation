@@ -21,7 +21,10 @@ import (
 func TestRunOperatorChecks_NoOverridesUsesDefaultOperatorsAndFails(t *testing.T) {
 	// With no platform-config overrides, the checker falls back to the
 	// built-in RequiredOperators list, and since none of those namespaces
-	// exist on the fake cluster, every operator should report FAIL.
+	// exist on the fake cluster, every operator reports a non-passing status:
+	// FAIL for required operators, WARN for optional ones (e.g. lws). Assert
+	// "not PASS" rather than "FAIL" so this stays valid as operators are marked
+	// optional.
 	c, _ := newTestController(nil)
 	c.cfg = config.PlatformConfig{}
 
@@ -30,8 +33,8 @@ func TestRunOperatorChecks_NoOverridesUsesDefaultOperatorsAndFails(t *testing.T)
 		t.Fatal("expected default operator checks to run")
 	}
 	for _, r := range results {
-		if r.Status != checks.StatusFail {
-			t.Errorf("expected FAIL for operator %s on an empty cluster, got %s", r.Name, r.Status)
+		if r.Status != checks.StatusFail && r.Status != checks.StatusWarn {
+			t.Errorf("expected FAIL or WARN for operator %s on an empty cluster, got %s", r.Name, r.Status)
 		}
 	}
 }
