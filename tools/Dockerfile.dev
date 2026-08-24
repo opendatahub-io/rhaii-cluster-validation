@@ -84,33 +84,35 @@ RUN dnf install -y \
     iperf3 tcpdump pciutils \
     && dnf clean all
 
-# Copy rdma-core libraries (libibverbs, libefa, libmlx5, librdmacm, libibmad, libibnetdisc, etc.)
-COPY --from=builder /usr/lib64/libibverbs* /usr/lib64/
-COPY --from=builder /usr/lib64/librdmacm* /usr/lib64/
-COPY --from=builder /usr/lib64/libibumad* /usr/lib64/
-COPY --from=builder /usr/lib64/libibmad* /usr/lib64/
-COPY --from=builder /usr/lib64/libibnetdisc* /usr/lib64/
-COPY --from=builder /usr/lib64/libefa* /usr/lib64/
-COPY --from=builder /usr/lib64/libmlx5* /usr/lib64/
-COPY --from=builder /usr/lib64/libmlx4* /usr/lib64/
+# Copy all shared libraries (rdma-core + libfabric)
+COPY --from=builder \
+    /usr/lib64/libib* \
+    /usr/lib64/librdmacm* \
+    /usr/lib64/libefa* \
+    /usr/lib64/libmlx* \
+    /usr/lib64/libfabric* \
+    /usr/lib64/
+# Provider plugins directory (libefa-rdmav60.so, libmlx5-rdmav60.so, etc.)
 COPY --from=builder /usr/lib64/libibverbs/ /usr/lib64/libibverbs/
 
-# Copy rdma-core utilities (libibverbs-utils: ibv_devinfo, ibv_devices, ibv_rc_pingpong, etc.)
-COPY --from=builder /usr/bin/ibv_* /usr/bin/
+# Copy RDMA & libfabric executables
+COPY --from=builder \
+    /usr/bin/ibv_* \
+    /usr/bin/fi_info \
+    /opt/fabtests/usr/bin/* \
+    /opt/perftest/usr/bin/* \
+    /usr/local/bin/
 
 # Copy infiniband-diags (ibstat, ibnetdiscover, iblinkinfo, perfquery, etc.)
-COPY --from=builder /usr/sbin/ib* /usr/sbin/
-COPY --from=builder /usr/sbin/perfquery /usr/sbin/saquery /usr/sbin/smpquery /usr/sbin/smpdump /usr/sbin/vendstat /usr/sbin/sminfo /usr/sbin/
-
-# Copy libfabric shared library and utilities (fi_info)
-COPY --from=builder /usr/lib64/libfabric* /usr/lib64/
-COPY --from=builder /usr/bin/fi_info /usr/local/bin/
-
-# Copy fabtests binaries (fi_rdm_pingpong, fi_rma_bw, fi_info, etc.)
-COPY --from=builder /opt/fabtests/usr/bin/ /usr/local/bin/
-
-# Copy perftest binaries (ib_write_bw, ibv_rc_pingpong, etc.)
-COPY --from=builder /opt/perftest/usr/bin/* /usr/local/bin/
+COPY --from=builder \
+    /usr/sbin/ib* \
+    /usr/sbin/perfquery \
+    /usr/sbin/saquery \
+    /usr/sbin/smpquery \
+    /usr/sbin/smpdump \
+    /usr/sbin/vendstat \
+    /usr/sbin/sminfo \
+    /usr/sbin/
 
 # Copy libcudart from builder — needed by perftest and fabtests at runtime.
 # The GPU driver library (libcuda.so.1) is mounted by the NVIDIA Container Toolkit.
