@@ -22,6 +22,8 @@ RUN dnf install -y \
 
 # --- Step 1: Build and install rdma-core v60.0 to /usr ---
 # Provides: libibverbs.so, libefa.so (EFA), libmlx5.so (IB/RoCE), librdmacm.so
+# NOTE: Unlike Dockerfile.dev, we do NOT need -DENABLE_RESOLVE_NEIGH=0 here
+# because libnl3-devel is available from RH repos (installed above).
 COPY tools/rdma-core/ /tmp/rdma-core/
 RUN cd /tmp/rdma-core && \
     cmake -GNinja -B build \
@@ -35,6 +37,10 @@ RUN cd /tmp/rdma-core && \
 
 # --- Step 2: Build and install libfabric v2.3.1amzn4.0 to /usr ---
 # Provides: libfabric.so.1 with EFA provider + CUDA HMEM support
+# NOTE: --enable-cuda-dlopen is used because this RH CUDA base image has no
+# libcuda.so/libnvidia-ml.so stubs. dlopen loads them at runtime via NVIDIA
+# Container Toolkit injection. Dockerfile.dev links directly (--with-cuda)
+# since the NVIDIA base image ships stubs. No CUDA stub symlinks needed here.
 COPY tools/libfabric/ /tmp/libfabric/
 RUN cd /tmp/libfabric && \
     ./autogen.sh && \

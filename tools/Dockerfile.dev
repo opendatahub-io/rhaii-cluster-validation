@@ -29,9 +29,16 @@ RUN cd /tmp/rdma-core && \
     ninja -C build -j$(nproc) && \
     ninja -C build install && \
     ldconfig
+# NOTE: -DENABLE_RESOLVE_NEIGH=0 disables libnl3 dependency (unavailable in
+# this base image). Only affects internal neighbour resolution for RoCEv2 ARP,
+# not needed for our RDMA tests. Dockerfile.konflux has libnl3-devel available
+# from RH repos so it omits this flag.
 
 # --- Step 2: Build and install libfabric v2.3.1amzn4.0 ---
 # Provides: libfabric.so.1 with EFA provider + CUDA HMEM support
+# NOTE: This base image (nvcr.io/nvidia/cuda) ships CUDA stubs, so we can link
+# directly (--with-cuda). Dockerfile.konflux uses --enable-cuda-dlopen instead
+# because the RH CUDA base has no libcuda.so/libnvidia-ml.so stubs.
 COPY tools/libfabric/ /tmp/libfabric/
 RUN cd /tmp/libfabric && \
     ./autogen.sh && \
@@ -41,8 +48,9 @@ RUN cd /tmp/libfabric && \
     make install && \
     ldconfig
 
-# Create CUDA stub symlinks so the linker can resolve libfabric's DT_NEEDED at build time.
-# At runtime, the real driver libs are injected by NVIDIA Container Toolkit.
+# Create CUDA stub symlinks so fabtests can link against libcuda/libnvidia-ml.
+# These are NOT copied to the runtime image — real libs injected by NVIDIA Container Toolkit.
+# (Not needed in Dockerfile.konflux which uses --enable-cuda-dlopen for fabtests too.)
 RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib64/libcuda.so.1 && \
     ln -s /usr/local/cuda/lib64/stubs/libnvidia-ml.so /usr/lib64/libnvidia-ml.so.1 && \
     ldconfig
