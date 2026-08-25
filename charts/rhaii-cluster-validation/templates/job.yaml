@@ -1,0 +1,110 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rhaii.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rhaii.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.controller.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ . }}
+  {{- end }}
+  # A failed validation (FAIL result → non-zero exit) is a real result, not a
+  # transient error, so don't retry.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "rhaii.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "rhaii.serviceAccountName" . }}
+      {{- $pullSecret := include "rhaii.pullSecretName" . }}
+      {{- if or $pullSecret .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- if $pullSecret }}
+        - name: {{ $pullSecret }}
+        {{- end }}
+        {{- with .Values.imagePullSecrets }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: {{ .Values.image.validator | default "quay.io/opendatahub/odh-rhaii-cluster-validator:odh-stable" }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - {{ .Values.checkMode | quote }}
+            {{- if eq .Values.checkMode "deps" }}
+            {{- /* deps is API-only: it accepts only -o/--output (and --config/--kubeconfig). */}}
+            {{- if .Values.outputFormat }}
+            - "-o"
+            - {{ .Values.outputFormat | quote }}
+            {{- end }}
+            {{- else }}
+            - "--namespace"
+            - {{ .Release.Namespace | quote }}
+            {{- if .Values.outputFormat }}
+            - "-o"
+            - {{ .Values.outputFormat | quote }}
+            {{- end }}
+            {{- if .Values.timeout }}
+            - "--timeout"
+            - {{ .Values.timeout | quote }}
+            {{- end }}
+            {{- with .Values.nodes }}
+            - "--nodes"
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- /* only these check modes accept --server-node/--client-nodes */}}
+            {{- if has .Values.checkMode (list "network" "rdma" "rdma-bandwidth" "all") }}
+            {{- if .Values.serverNode }}
+            - "--server-node"
+            - {{ .Values.serverNode | quote }}
+            {{- end }}
+            {{- with .Values.clientNodes }}
+            - "--client-nodes"
+            - {{ join "," . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $pullSecret }}
+            - "--pull-secret"
+            - {{ $pullSecret | quote }}
+            {{- end }}
+            {{- if .Values.debug }}
+            - "--debug"
+            {{- end }}
+            {{- end }}
+          env:
+            {{- if .Values.image.validator }}
+            - name: RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR
+              value: {{ .Values.image.validator | quote }}
+            {{- end }}
+            {{- if .Values.image.tools }}
+            - name: RELATED_IMAGE_RHAII_VALIDATOR_TOOLS
+              value: {{ .Values.image.tools | quote }}
+            {{- end }}
+            {{- /* Arbitrary additional RELATED_IMAGE_* overrides (e.g. a future
+                   NCCL image). Keys are used verbatim as env var names. */}}
+            {{- range $name, $value := .Values.extraRelatedImages }}
+            {{- if $value }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

@@ -1,0 +1,19 @@
+apiVersion: v2
+name: rhaii-cluster-validation
+description: >-
+  Validates GPU cluster readiness for AI/ML workloads (GPU driver/ECC, RDMA
+  topology/connectivity/bandwidth, network) by running the rhaii-validator
+  controller as an in-cluster Job.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/opendatahub-io/rhaii-cluster-validation
+keywords:
+  - gpu
+  - rdma
+  - networking
+  - validation
+  - ai
+  - kubernetes
+sources:
+  - https://github.com/opendatahub-io/rhaii-cluster-validation
