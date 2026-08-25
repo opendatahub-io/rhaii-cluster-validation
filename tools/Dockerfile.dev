@@ -2,19 +2,71 @@ ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.0.0-devel-ubi9
 ARG RUNTIME_IMAGE=registry.access.redhat.com/ubi9/ubi:latest
 
 # ============================================================================
-# Builder Stage: Build perftest from source (needs CUDA headers)
+# Builder Stage: Build rdma-core, libfabric, fabtests, and perftest from source
+# All versions pinned to match AWS EFA installer 1.46.0 / llm-d v0.8.1
 # ============================================================================
 FROM ${BUILDER_IMAGE} AS builder
 
-# Install build dependencies (autotools needed — building from git source)
+# Install build dependencies
 RUN dnf install -y \
     gcc gcc-c++ make diffutils \
-    autoconf automake libtool \
+    autoconf automake libtool pkg-config \
+    cmake ninja-build \
+    python3 \
     pciutils-devel \
-    rdma-core-devel libibverbs-devel librdmacm-devel libibumad-devel \
     && dnf clean all
 
-# Build perftest from source (git submodule) with CUDA support
+# --- Step 1: Build and install rdma-core v60.0 ---
+# Provides: libibverbs.so, libefa.so (EFA), libmlx5.so (IB/RoCE), librdmacm.so
+COPY tools/rdma-core/ /tmp/rdma-core/
+RUN cd /tmp/rdma-core && \
+    cmake -GNinja -B build \
+      -DCMAKE_INSTALL_PREFIX=/usr \
+      -DCMAKE_INSTALL_LIBDIR=lib64 \
+      -DNO_MAN_PAGES=1 \
+      -DNO_PYVERBS=1 \
+      -DENABLE_RESOLVE_NEIGH=0 && \
+    ninja -C build -j$(nproc) && \
+    ninja -C build install && \
+    ldconfig
+# NOTE: -DENABLE_RESOLVE_NEIGH=0 disables libnl3 dependency (unavailable in
+# this base image). Only affects internal neighbour resolution for RoCEv2 ARP,
+# not needed for our RDMA tests. Dockerfile.konflux has libnl3-devel available
+# from RH repos so it omits this flag.
+
+# --- Step 2: Build and install libfabric v2.3.1amzn4.0 ---
+# Provides: libfabric.so.1 with EFA provider + CUDA HMEM support
+# NOTE: This base image (nvcr.io/nvidia/cuda) ships CUDA stubs, so we can link
+# directly (--with-cuda). Dockerfile.konflux uses --enable-cuda-dlopen instead
+# because the RH CUDA base has no libcuda.so/libnvidia-ml.so stubs.
+COPY tools/libfabric/ /tmp/libfabric/
+RUN cd /tmp/libfabric && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr --libdir=/usr/lib64 \
+      --with-cuda=/usr/local/cuda && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Create CUDA stub symlinks so fabtests can link against libcuda/libnvidia-ml.
+# These are NOT copied to the runtime image — real libs injected by NVIDIA Container Toolkit.
+# (Not needed in Dockerfile.konflux which uses --enable-cuda-dlopen for fabtests too.)
+RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib64/libcuda.so.1 && \
+    ln -s /usr/local/cuda/lib64/stubs/libnvidia-ml.so /usr/lib64/libnvidia-ml.so.1 && \
+    ldconfig
+
+# --- Step 3: Build fabtests (from libfabric source tree) ---
+# Provides: fi_rdm_pingpong (EFA reachability), fi_rma_bw (EFA bandwidth)
+RUN cd /tmp/libfabric/fabtests && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr --libdir=/usr/lib64 \
+      --with-cuda=/usr/local/cuda \
+      --with-libfabric=/usr && \
+    make -j$(nproc) && \
+    make install DESTDIR=/opt/fabtests
+
+# --- Step 4: Build perftest from source (existing) ---
+# Provides: ib_write_bw, ibv_rc_pingpong (IB/RoCE bandwidth + reachability)
 COPY tools/perftest/ /tmp/perftest/
 RUN test -f /tmp/perftest/autogen.sh || \
     { echo "ERROR: tools/perftest/ is empty. Run: git submodule update --init tools/perftest"; exit 1; } && \
@@ -22,7 +74,7 @@ RUN test -f /tmp/perftest/autogen.sh || \
     ./autogen.sh && \
     ./configure --prefix=/usr --enable-cudart && \
     make -j$(nproc) && \
-    make install DESTDIR=/install
+    make install DESTDIR=/opt/perftest
 
 
 # ============================================================================
@@ -30,31 +82,52 @@ RUN test -f /tmp/perftest/autogen.sh || \
 # ============================================================================
 FROM ${RUNTIME_IMAGE}
 
-# Root required: RDMA perftest (ib_write_bw, ib_read_bw) and GPU bandwidth tools
-# need direct access to InfiniBand/RoCE devices and CUDA runtime.
 USER root
-
 WORKDIR /root
 
-# Install runtime utilities
+# Install runtime utilities (no system rdma-core — we bring our own from source)
 RUN dnf install -y \
     wget procps-ng jq bc iputils ethtool net-tools \
     numactl kmod systemd-udev libpcap python3 hostname \
     iperf3 tcpdump pciutils \
     && dnf clean all
 
-# Install RDMA libraries (matches what perftest was compiled against)
-RUN dnf install -y libibverbs libibverbs-utils libibumad librdmacm infiniband-diags && dnf clean all
+# Copy all shared libraries (rdma-core + libfabric)
+COPY --from=builder \
+    /usr/lib64/libib* \
+    /usr/lib64/librdmacm* \
+    /usr/lib64/libefa* \
+    /usr/lib64/libmlx* \
+    /usr/lib64/libfabric* \
+    /usr/lib64/
+# Provider plugins directory (libefa-rdmav60.so, libmlx5-rdmav60.so, etc.)
+COPY --from=builder /usr/lib64/libibverbs/ /usr/lib64/libibverbs/
 
-# Copy perftest binaries from builder
-COPY --from=builder /install/usr/bin/* /usr/local/bin/
+# Copy RDMA & libfabric executables
+COPY --from=builder \
+    /usr/bin/ibv_* \
+    /usr/bin/fi_info \
+    /opt/fabtests/usr/bin/* \
+    /opt/perftest/usr/bin/* \
+    /usr/local/bin/
 
-# Copy libcudart from builder — the only CUDA library perftest needs at runtime (~756K).
+# Copy infiniband-diags (ibstat, ibnetdiscover, iblinkinfo, perfquery, etc.)
+COPY --from=builder \
+    /usr/sbin/ib* \
+    /usr/sbin/perfquery \
+    /usr/sbin/saquery \
+    /usr/sbin/smpquery \
+    /usr/sbin/smpdump \
+    /usr/sbin/vendstat \
+    /usr/sbin/sminfo \
+    /usr/sbin/
+
+# Copy libcudart from builder — needed by perftest and fabtests at runtime.
 # The GPU driver library (libcuda.so.1) is mounted by the NVIDIA Container Toolkit.
 COPY --from=builder /usr/local/cuda/lib64/libcudart.so.* /usr/local/lib/
-RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/cuda.conf && ldconfig
+RUN ln -s libcudart.so.13 /usr/local/lib/libcudart.so && \
+    echo "/usr/local/lib" > /etc/ld.so.conf.d/cuda.conf && ldconfig
 
-# Create results directory
 RUN mkdir -p /results
 
 CMD ["/bin/bash"]

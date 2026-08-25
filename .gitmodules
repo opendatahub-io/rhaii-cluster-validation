@@ -1,3 +1,9 @@
 [submodule "tools/perftest"]
 	path = tools/perftest
 	url = https://github.com/linux-rdma/perftest.git
+[submodule "tools/rdma-core"]
+	path = tools/rdma-core
+	url = https://github.com/linux-rdma/rdma-core.git
+[submodule "tools/libfabric"]
+	path = tools/libfabric
+	url = https://github.com/aws/libfabric.git
