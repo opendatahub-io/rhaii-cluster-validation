@@ -13,10 +13,10 @@ import (
 )
 
 const (
-	pingmeshPortBase       = 18515
-	defaultPingTimeout     = 10
-	defaultPingIterations  = 1
-	defaultServerBufSec    = 30
+	pingmeshPortBase      = 18515
+	defaultPingTimeout    = 10
+	defaultPingIterations = 1
+	defaultServerBufSec   = 30
 )
 
 // PingMeshJob implements jobrunner.Job for pairwise RDMA connectivity testing
@@ -259,9 +259,9 @@ func (j *PingMeshJob) ClientSpec(node, namespace, image, serverIP string) (*batc
 
 // pingmeshClientOutput is the wrapper JSON object emitted by client pods.
 type pingmeshClientOutput struct {
-	ServerNode string                `json:"server_node"`
-	ClientNode string                `json:"client_node"`
-	Results    []PingMeshPairResult  `json:"results"`
+	ServerNode string               `json:"server_node"`
+	ClientNode string               `json:"client_node"`
+	Results    []PingMeshPairResult `json:"results"`
 }
 
 // ParseResult parses the client pod JSON output into a JobResult.

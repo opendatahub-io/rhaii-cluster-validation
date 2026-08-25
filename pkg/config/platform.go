@@ -25,11 +25,11 @@ const (
 type PlatformConfig struct {
 	Platform Platform `yaml:"platform" json:"platform"`
 
-	Agent      ResourceConfig `yaml:"agent" json:"agent"`
-	Jobs       ResourceConfig `yaml:"jobs" json:"jobs"`
-	GPU        GPUConfig      `yaml:"gpu" json:"gpu"`
-	CRDs       CRDConfig      `yaml:"crds" json:"crds"`
-	Operators  OperatorConfig `yaml:"operators" json:"operators"`
+	Agent      ResourceConfig  `yaml:"agent" json:"agent"`
+	Jobs       ResourceConfig  `yaml:"jobs" json:"jobs"`
+	GPU        GPUConfig       `yaml:"gpu" json:"gpu"`
+	CRDs       CRDConfig       `yaml:"crds" json:"crds"`
+	Operators  OperatorConfig  `yaml:"operators" json:"operators"`
 	Thresholds ThresholdConfig `yaml:"thresholds" json:"thresholds"`
 }
 
@@ -80,7 +80,7 @@ const (
 // RDMAJobConfig holds ib_write_bw test parameters.
 // Zero values mean "use defaults" (QPs=4, MessageSize=1MiB).
 type RDMAJobConfig struct {
-	QPs         int `yaml:"qps,omitempty" json:"qps,omitempty"`         // Number of queue pairs
+	QPs         int `yaml:"qps,omitempty" json:"qps,omitempty"`                   // Number of queue pairs
 	MessageSize int `yaml:"message_size,omitempty" json:"message_size,omitempty"` // Message size in bytes
 }
 

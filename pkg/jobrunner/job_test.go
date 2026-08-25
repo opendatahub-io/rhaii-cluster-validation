@@ -84,7 +84,7 @@ type MockJobWithCustomImages struct {
 	clientImg string
 }
 
-func (m *MockJobWithCustomImages) Name() string { return "mock-custom-img" }
+func (m *MockJobWithCustomImages) Name() string           { return "mock-custom-img" }
 func (m *MockJobWithCustomImages) GetServerImage() string { return m.serverImg }
 func (m *MockJobWithCustomImages) GetClientImage() string { return m.clientImg }
 func (m *MockJobWithCustomImages) ServerSpec(node, namespace, image string) (*batchv1.Job, error) {

@@ -178,9 +178,9 @@ func TestResourceConfig_WithRDMA(t *testing.T) {
 	// Simulate a config with RDMA resources
 	rc := ResourceConfig{
 		Requests: map[string]string{
-			"cpu":              "500m",
-			"memory":           "512Mi",
-			"nvidia.com/roce":  "1",
+			"cpu":             "500m",
+			"memory":          "512Mi",
+			"nvidia.com/roce": "1",
 		},
 		Limits: map[string]string{
 			"nvidia.com/roce": "1",

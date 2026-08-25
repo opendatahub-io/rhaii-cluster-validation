@@ -41,21 +41,21 @@ func TestCompareSemver(t *testing.T) {
 		{"v2.0.0", "v1.9.9", 1},
 		{"v1.0.1", "v1.0.0", 1},
 		{"v1.0.0", "v1.0.1", -1},
-		{"1.4.0", "1.3.0", 1},   // no v prefix
-		{"v1.4", "v1.3.0", 1},   // missing patch
-		{"v1.0", "v1.0.0", 0},   // missing patch = 0
+		{"1.4.0", "1.3.0", 1}, // no v prefix
+		{"v1.4", "v1.3.0", 1}, // missing patch
+		{"v1.0", "v1.0.0", 0}, // missing patch = 0
 		{"v1.3.1", "v1.3.1", 0},
 		{"v0.1.0", "v0.0.9", 1},
 		{"v10.0.0", "v9.0.0", 1},
 		// Pre-release handling
-		{"v1.4.0", "v1.4.0-rc1", 1},    // release > pre-release
-		{"v1.4.0-rc1", "v1.4.0", -1},   // pre-release < release
+		{"v1.4.0", "v1.4.0-rc1", 1},  // release > pre-release
+		{"v1.4.0-rc1", "v1.4.0", -1}, // pre-release < release
 		{"v1.4.0-rc1", "v1.4.0-rc1", 0},
 		{"v1.4.0-rc1", "v1.4.0-rc2", -1},
 		{"v1.4.0-rc2", "v1.4.0-rc1", 1},
 		{"v1.4.0-alpha1", "v1.4.0-beta1", -1}, // alpha < beta lexically
 		{"v1.4.0-beta1", "v1.4.0-rc1", -1},    // beta < rc lexically
-		{"v1.4.0-rc1", "v1.3.0", 1},            // higher numeric wins regardless of pre-release
+		{"v1.4.0-rc1", "v1.3.0", 1},           // higher numeric wins regardless of pre-release
 		{"v1.3.0-rc1", "v1.4.0", -1},
 	}
 

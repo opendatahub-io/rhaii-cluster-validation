@@ -32,7 +32,7 @@ import (
 
 const (
 	defaultPort     = 12865
-	defaultDuration = 5 // seconds
+	defaultDuration = 5  // seconds
 	messageSize     = 64 // bytes per request
 )
 

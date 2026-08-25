@@ -477,3 +477,4 @@ Container images are automatically built and pushed to `quay.io/opendatahub` via
 See [docs/platform-config.md](docs/platform-config.md) for per-platform configuration examples (OCP, AKS, CoreWeave, EKS).
 See [CLAUDE.md](CLAUDE.md) for full developer docs.
 See [docs/dev.md](docs/dev.md) for odh-cli integration guide.
+See [docs/testing.md](docs/testing.md) for building and running the validator locally against a cluster.

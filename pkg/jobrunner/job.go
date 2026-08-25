@@ -38,8 +38,8 @@ type PodConfig struct {
 	Annotations      map[string]string `json:"annotations,omitempty" yaml:"annotations,omitempty"`
 	ResourceRequests map[string]string `json:"resourceRequests,omitempty" yaml:"resourceRequests,omitempty"`
 	ResourceLimits   map[string]string `json:"resourceLimits,omitempty" yaml:"resourceLimits,omitempty"`
-	Privileged       bool             `json:"privileged,omitempty" yaml:"privileged,omitempty"`
-	NameSuffix       string           `json:"-" yaml:"-"` // appended to job name for uniqueness (e.g. round/attempt)
+	Privileged       bool              `json:"privileged,omitempty" yaml:"privileged,omitempty"`
+	NameSuffix       string            `json:"-" yaml:"-"` // appended to job name for uniqueness (e.g. round/attempt)
 }
 
 // Clone returns a deep copy of the PodConfig, including all map fields.
