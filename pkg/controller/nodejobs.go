@@ -70,8 +70,21 @@ func (c *Controller) deployNodeCheckJobs(ctx context.Context, spec nodeCheckJobS
 		gpuCount := c.gpuCounts[nodeName]
 		jobrunner.SetGPUResource(container, c.gpuResource, gpuCount)
 
-		if err := jobrunner.ApplyResourceConfig(container, spec.resourceCfg.Requests, spec.resourceCfg.Limits); err != nil {
+		resourceCfg := spec.resourceCfg
+		rdmaType := spec.resourceCfg.RDMAType
+		if spec.checkMode == CheckModeRDMANode && c.platform == config.PlatformEKS {
+			if count, ok := c.efaCounts[nodeName]; ok && count > 0 {
+				rdmaType = string(config.RDMATypeSRD)
+			}
+		}
+
+		if err := jobrunner.ApplyResourceConfig(container, resourceCfg.Requests, resourceCfg.Limits); err != nil {
 			return fmt.Errorf("invalid %s resource config: %w", spec.kind, err)
+		}
+
+		var efaCount int64
+		if spec.checkMode == CheckModeRDMANode {
+			efaCount = c.applyAutoEFA(container, nodeName)
 		}
 
 		if len(spec.resourceCfg.Annotations) > 0 {
@@ -88,14 +101,18 @@ func (c *Controller) deployNodeCheckJobs(ctx context.Context, spec nodeCheckJobS
 			corev1.EnvVar{Name: "CHECK_MODE", Value: spec.checkMode},
 		)
 		if spec.setRDMAType {
-			container.Env = append(container.Env, corev1.EnvVar{Name: "RDMA_TYPE", Value: spec.resourceCfg.RDMAType})
+			container.Env = append(container.Env, corev1.EnvVar{Name: "RDMA_TYPE", Value: rdmaType})
 		}
-
 		_, err := c.client.BatchV1().Jobs(c.opts.Namespace).Create(ctx, job, metav1.CreateOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to create %s job for node %s: %w", spec.kind, nodeName, err)
 		}
-		fmt.Fprintf(c.output, "  Created %s job %s (node: %s, GPUs: %d)\n", spec.kind, jobName, nodeName, gpuCount)
+		msg := fmt.Sprintf("  Created %s job %s (node: %s, GPUs: %d)\n", spec.kind, jobName, nodeName, gpuCount)
+		if efaCount > 0 {
+			msg = fmt.Sprintf("  Created %s job %s (node: %s, GPUs: %d, EFA: %d, RDMA_TYPE: %s)\n",
+				spec.kind, jobName, nodeName, gpuCount, efaCount, rdmaType)
+		}
+		fmt.Fprint(c.output, msg)
 	}
 	return nil
 }

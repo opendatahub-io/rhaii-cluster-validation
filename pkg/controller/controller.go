@@ -80,6 +80,7 @@ type Controller struct {
 	gpuNodeLabel         string              // label used to discover GPU nodes (empty = fallback to resources)
 	gpuNodes             []string            // discovered GPU node names
 	gpuCounts            map[string]int64    // GPU count per node (from allocatable)
+	efaCounts            map[string]int64    // EFA count per node on EKS (from allocatable)
 	gpuResource          corev1.ResourceName // e.g. "nvidia.com/gpu" or "amd.com/gpu"
 	jobs                 []jobrunner.Job
 	clusterResults       []checks.Result      // Tier 1 (API) check results (CRDs, etc.)

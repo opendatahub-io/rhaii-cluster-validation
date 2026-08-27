@@ -63,6 +63,8 @@ const (
 	PairingNUMALoadBalance PairingStrategy = "numa_load_balance"
 	// PairingBandwidthProbe pairs by measured intra-host loopback ib_write_bw bandwidth.
 	PairingBandwidthProbe PairingStrategy = "intra-host_bandwidth"
+	// PairingMultiNICPCIe assigns multiple NICs per GPU by PCIe tree proximity.
+	PairingMultiNICPCIe PairingStrategy = "multi_nic_pcie"
 )
 
 // GPUInfo describes a single GPU with its PCIe location.
@@ -165,17 +167,17 @@ type NodeReport struct {
 }
 
 // NormalizeRDMAType validates and normalizes an RDMA type string.
-// Returns the typed RDMAType if valid ("ib" or "roce"), empty for
+// Returns the typed RDMAType if valid ("ib", "roce", or "srd"), empty for
 // empty input, or an error for unrecognized values.
 func NormalizeRDMAType(rdmaType string) (config.RDMAType, error) {
 	rt := config.RDMAType(strings.ToLower(strings.TrimSpace(rdmaType)))
 	if rt == "" {
 		return "", nil
 	}
-	if rt == config.RDMATypeIB || rt == config.RDMATypeRoCE {
+	if rt == config.RDMATypeIB || rt == config.RDMATypeRoCE || rt == config.RDMATypeSRD {
 		return rt, nil
 	}
-	return "", fmt.Errorf("invalid RDMA_TYPE %q: must be %q, %q, or empty", rdmaType, config.RDMATypeIB, config.RDMATypeRoCE)
+	return "", fmt.Errorf("invalid RDMA_TYPE %q: must be %q, %q, %q, or empty", rdmaType, config.RDMATypeIB, config.RDMATypeRoCE, config.RDMATypeSRD)
 }
 
 // ExtractTopology finds the gpu_nic_topology check result and deserializes

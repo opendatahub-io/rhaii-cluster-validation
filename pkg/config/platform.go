@@ -75,6 +75,7 @@ type RDMAType string
 const (
 	RDMATypeIB   RDMAType = "ib"
 	RDMATypeRoCE RDMAType = "roce"
+	RDMATypeSRD  RDMAType = "srd"
 )
 
 // RDMAJobConfig holds ib_write_bw test parameters.
@@ -86,8 +87,8 @@ type RDMAJobConfig struct {
 
 // Validate checks that user-provided config values are well-formed.
 func (c PlatformConfig) Validate() error {
-	if rt := RDMAType(c.Jobs.RDMAType); rt != "" && rt != RDMATypeIB && rt != RDMATypeRoCE {
-		return fmt.Errorf("invalid jobs.rdma_type %q: must be %q, %q, or empty", c.Jobs.RDMAType, RDMATypeIB, RDMATypeRoCE)
+	if rt := RDMAType(c.Jobs.RDMAType); rt != "" && rt != RDMATypeIB && rt != RDMATypeRoCE && rt != RDMATypeSRD {
+		return fmt.Errorf("invalid jobs.rdma_type %q: must be %q, %q, %q, or empty", c.Jobs.RDMAType, RDMATypeIB, RDMATypeRoCE, RDMATypeSRD)
 	}
 	if c.Jobs.RDMA.QPs < 0 {
 		return fmt.Errorf("invalid jobs.rdma.qps %d: must be >= 0", c.Jobs.RDMA.QPs)
