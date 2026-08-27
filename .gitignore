@@ -1,5 +1,6 @@
 # Build output
 bin/
+agent
 
 # IDE
 .idea/
