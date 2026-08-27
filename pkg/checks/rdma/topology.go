@@ -418,7 +418,7 @@ func buildPairs(gpus []checks.GPUInfo, nics []checks.NICInfo, rdmaType config.RD
 		return pcieDistancePairing(gpus, nics), false, checks.PairingPCIeDistance
 	}
 
-	if rdmaType == config.RDMATypeSRD || (hasEFANIC(nics) && len(nics) > len(gpus)) {
+	if rdmaType == config.RDMATypeSRD && (len(nics) > len(gpus)) {
 		if hasPCIePaths(gpus, nics) {
 			return multiNICPCIePairing(gpus, nics), false, checks.PairingMultiNICPCIe
 		}

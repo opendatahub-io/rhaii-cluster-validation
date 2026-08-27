@@ -48,9 +48,6 @@ func FormatPairsCompact(pairs []checks.GPUNICPair, strategy checks.PairingStrate
 	}
 
 	out := strings.Join(parts, ", ")
-	if strategy != "" {
-		out += fmt.Sprintf(" [%s]", strategy)
-	}
 	return out
 }
 

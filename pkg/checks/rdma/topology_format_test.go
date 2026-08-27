@@ -14,7 +14,7 @@ func TestFormatPairsCompact(t *testing.T) {
 		{GPU: checks.GPUInfo{ID: 0}, NIC: checks.NICInfo{Dev: "rdmap82s0"}},
 	}
 	got := FormatPairsCompact(pairs, checks.PairingMultiNICPCIe)
-	want := "GPU0↔rdmap79s0-82s0 (×4) [multi_nic_pcie]"
+	want := "GPU0↔rdmap79s0-82s0 (×4)"
 	if got != want {
 		t.Errorf("FormatPairsCompact = %q, want %q", got, want)
 	}
@@ -25,7 +25,7 @@ func TestFormatPairsCompact_singlePair(t *testing.T) {
 		{GPU: checks.GPUInfo{ID: 0}, NIC: checks.NICInfo{Dev: "mlx5_0"}},
 	}
 	got := FormatPairsCompact(pairs, checks.PairingPCIeDistance)
-	want := "GPU0↔mlx5_0 [pcie_distance]"
+	want := "GPU0↔mlx5_0"
 	if got != want {
 		t.Errorf("FormatPairsCompact = %q, want %q", got, want)
 	}

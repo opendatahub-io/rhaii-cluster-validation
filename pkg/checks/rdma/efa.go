@@ -1,9 +1,5 @@
 package rdma
 
-import (
-	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
-)
-
 const efaVendorID = "0x1d0f"
 
 // efaDeviceIDs lists Amazon EFA PCI device IDs (0xefa0–0xefa4).
@@ -28,14 +24,4 @@ func IsEFADevice(dev string) bool {
 
 func isEFAPCI(vendor, device string) bool {
 	return vendor == efaVendorID && efaDeviceIDs[device]
-}
-
-// hasEFANIC returns true when any NIC in the list is an EFA device.
-func hasEFANIC(nics []checks.NICInfo) bool {
-	for _, n := range nics {
-		if IsEFADevice(n.Dev) {
-			return true
-		}
-	}
-	return false
 }
