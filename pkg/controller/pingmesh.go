@@ -94,13 +94,14 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 
 			// Inject EFA resources if using EFA RDMA type
 			if rdmaType == config.RDMATypeSRD {
-				// Get allocatable resources for server node to determine EFA count
-				serverNode, err := c.client.CoreV1().Nodes().Get(ctx, serverNode, metav1.GetOptions{})
-				if err == nil {
-					efaCount := config.AutoEFACount(serverNode.Status.Allocatable, config.ResourceConfigHasEFA(c.cfg.Jobs), c.cfg.Jobs.GetEFACount())
-					if efaCount > 0 {
-						pmJob.SetExtendedResource(string(config.EFAResourceName), fmt.Sprintf("%d", efaCount))
-					}
+				node, err := c.client.CoreV1().Nodes().Get(ctx, serverNode, metav1.GetOptions{})
+				if err != nil {
+					fmt.Fprintf(c.output, "  Warning: failed to get server node %s for EFA count: %v, skipping pair\n", serverNode, err)
+					continue
+				}
+				efaCount := config.AutoEFACount(node.Status.Allocatable, config.ResourceConfigHasEFA(c.cfg.Jobs), c.cfg.Jobs.GetEFACount())
+				if efaCount > 0 {
+					pmJob.SetExtendedResource(string(config.EFAResourceName), fmt.Sprintf("%d", efaCount))
 				}
 			}
 
