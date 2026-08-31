@@ -55,6 +55,18 @@ func NewPingMeshJob(serverNode, clientNode string, serverDevs, clientDevs []stri
 	}
 }
 
+// ValidateDevices returns an error when ServerDevices or ClientDevices are empty
+// or contain no names matching ValidDeviceName (e.g. after filteredDevices).
+func (j *PingMeshJob) ValidateDevices() error {
+	if j.validDeviceCount(j.ServerDevices) == 0 {
+		return fmt.Errorf("pingmesh: no valid server RDMA devices")
+	}
+	if j.validDeviceCount(j.ClientDevices) == 0 {
+		return fmt.Errorf("pingmesh: no valid client RDMA devices")
+	}
+	return nil
+}
+
 func (j *PingMeshJob) Name() string { return "pingmesh" }
 
 func (j *PingMeshJob) SetPodConfig(cfg *jobrunner.PodConfig) {
@@ -405,7 +417,11 @@ func (j *PingMeshJob) ParseResult(logs string) (*jobrunner.JobResult, error) {
 	}
 
 	status := checks.StatusPass
-	if passed == 0 && len(results) > 0 {
+	msg := fmt.Sprintf("Pingmesh: %d/%d NIC pairs passed", passed, len(results))
+	if len(results) == 0 {
+		status = checks.StatusFail
+		msg = "Pingmesh: no NIC pairs probed"
+	} else if passed == 0 {
 		status = checks.StatusFail
 	} else if passed < len(results) {
 		status = checks.StatusFail
@@ -413,7 +429,7 @@ func (j *PingMeshJob) ParseResult(logs string) (*jobrunner.JobResult, error) {
 
 	return &jobrunner.JobResult{
 		Status:  status,
-		Message: fmt.Sprintf("Pingmesh: %d/%d NIC pairs passed", passed, len(results)),
+		Message: msg,
 		Details: results,
 	}, nil
 }

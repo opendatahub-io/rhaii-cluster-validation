@@ -84,6 +84,10 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 			}
 			pair := jobrunner.NodePair{Server: serverNode, Client: clientNode}
 			pmJob := rdma.NewPingMeshJob(serverNode, clientNode, serverDevs, clientDevs, rdmaType, gidIndex, iterations, timeout)
+			if err := pmJob.ValidateDevices(); err != nil {
+				fmt.Fprintf(c.output, "  Warning: %v for %s↔%s, skipping pair\n", err, serverNode, clientNode)
+				continue
+			}
 			pmJob.SetPodConfig(rdmaCfg)
 			pmJob.SetServerImage(toolsImage)
 			pmJob.SetClientImage(toolsImage)

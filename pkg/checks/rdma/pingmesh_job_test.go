@@ -45,7 +45,7 @@ func TestParseResult(t *testing.T) {
 			logs:       `{"server_node":"a","client_node":"b","results":[]}`,
 			wantPassed: 0,
 			wantTotal:  0,
-			wantStatus: checks.StatusPass,
+			wantStatus: checks.StatusFail,
 		},
 		{
 			name:       "with leading noise",
@@ -147,6 +147,26 @@ func TestValidDeviceCount(t *testing.T) {
 	}
 	if got := j.validDeviceCount(nil); got != 0 {
 		t.Errorf("validDeviceCount(nil) = %d, want 0", got)
+	}
+}
+
+func TestNewPingMeshJobRejectsNoValidDevices(t *testing.T) {
+	valid := []string{"ibp0"}
+	tests := []struct {
+		name       string
+		serverDevs []string
+		clientDevs []string
+	}{
+		{"empty server", nil, valid},
+		{"invalid client", valid, []string{"../etc/passwd"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := NewPingMeshJob("a", "b", tt.serverDevs, tt.clientDevs, config.RDMATypeSRD, -1, 3, 10)
+			if err := j.ValidateDevices(); err == nil {
+				t.Fatal("expected error")
+			}
+		})
 	}
 }
 
