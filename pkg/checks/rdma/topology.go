@@ -280,7 +280,7 @@ func discoverNICs(ctx context.Context, rdmaType config.RDMAType) ([]checks.NICIn
 		llOutput, err := sysfsExec(ctx, "cat",
 			filepath.Join("/sys/class/infiniband", dev, "ports/1/link_layer"))
 		if err == nil {
-			linkLayer = checks.LinkLayer(strings.TrimSpace(string(llOutput)))
+			linkLayer = resolveLinkLayer(dev, string(llOutput))
 		}
 
 		if pciAddr != "" && !validPCIAddr(pciAddr) {
