@@ -3,7 +3,6 @@ package rdma
 import (
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 )
@@ -86,13 +85,9 @@ func ApplyBandwidthPairing(netReports []checks.NodeReport, bwResults map[string]
 		topo.PairingStrategy = checks.PairingBandwidthProbe
 		topo.GPUNICPCIeMapping = BuildGPUNICPCIeMapping(newPairs)
 
-		// Update the topology result: Details and Message
-		var pairDescs []string
-		for _, p := range newPairs {
-			pairDescs = append(pairDescs, fmt.Sprintf("GPU%d↔%s(NUMA:%d↔%d)", p.GPU.ID, p.NIC.Dev, p.GPU.NUMA, p.NIC.NUMA))
-		}
 		updatedMsg := fmt.Sprintf("%d GPU(s), %d NIC(s), strategy=%s: %s",
-			len(topo.GPUList), len(topo.NICList), topo.PairingStrategy, strings.Join(pairDescs, ", "))
+			len(topo.GPUList), len(topo.NICList), topo.PairingStrategy,
+			FormatPairsCompact(newPairs, topo.PairingStrategy))
 		for j, res := range netReports[i].Results {
 			if res.Name == "gpu_nic_topology" {
 				netReports[i].Results[j].Details = topo

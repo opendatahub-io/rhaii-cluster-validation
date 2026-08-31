@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/config"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -132,5 +134,128 @@ func TestCollectAvailableJobs_ReportsMissingNodes(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "missing: node1, node2") {
 		t.Errorf("expected missing-node warning, got output: %s", buf.String())
+	}
+}
+
+func TestDeployNodeCheckJobs_EFAInjection(t *testing.T) {
+	client := fake.NewSimpleClientset() //nolint:staticcheck
+	c, buf := newTestController(client)
+	c.platform = config.PlatformEKS
+	c.gpuNodes = []string{"p5-node"}
+	c.gpuCounts = map[string]int64{"p5-node": 8}
+	c.efaCounts = map[string]int64{"p5-node": 32}
+	c.gpuResource = "nvidia.com/gpu"
+	c.gpuVendor = config.GPUVendorNVIDIA
+	c.opts.Image = "validator:test"
+	c.cfg.Jobs = config.ResourceConfig{
+		Requests: map[string]string{
+			"cpu": "500m",
+		},
+		RDMAType: "ib",
+	}
+
+	err := c.deployNodeCheckJobs(context.Background(), nodeCheckJobSpec{
+		kind:        "RDMA node check",
+		namePrefix:  "rhaii-validate-net-",
+		labelValue:  netCheckJobLabelValue,
+		resourceCfg: c.cfg.Jobs,
+		checkMode:   CheckModeRDMANode,
+		setRDMAType: true,
+	})
+	if err != nil {
+		t.Fatalf("deployNodeCheckJobs() error = %v", err)
+	}
+
+	jobs, err := client.BatchV1().Jobs(c.opts.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs.Items) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs.Items))
+	}
+	container := jobs.Items[0].Spec.Template.Spec.Containers[0]
+	efaQty := container.Resources.Requests[config.EFAResourceName]
+	if efaQty.Value() != 32 {
+		t.Errorf("EFA requests = %d, want 32", efaQty.Value())
+	}
+	var rdmaType string
+	for _, env := range container.Env {
+		switch env.Name {
+		case "RDMA_TYPE":
+			rdmaType = env.Value
+		}
+	}
+	if rdmaType != "srd" {
+		t.Errorf("RDMA_TYPE = %q, want srd", rdmaType)
+	}
+	if !strings.Contains(buf.String(), "EFA: 32") {
+		t.Errorf("expected EFA log line, got: %s", buf.String())
+	}
+}
+
+func TestDeployNodeCheckJobs_EFAConfigOverridesAutoDetect(t *testing.T) {
+	client := fake.NewSimpleClientset() //nolint:staticcheck
+	c, _ := newTestController(client)
+	c.platform = config.PlatformEKS
+	c.gpuNodes = []string{"p5-node"}
+	c.gpuCounts = map[string]int64{"p5-node": 8}
+	c.efaCounts = map[string]int64{"p5-node": 32}
+	c.gpuResource = "nvidia.com/gpu"
+	c.opts.Image = "validator:test"
+	c.cfg.Jobs = config.ResourceConfig{
+		Requests: map[string]string{
+			"cpu":                   "500m",
+			"vpc.amazonaws.com/efa": "16",
+		},
+	}
+
+	if err := c.deployNodeCheckJobs(context.Background(), nodeCheckJobSpec{
+		kind:        "RDMA node check",
+		namePrefix:  "rhaii-validate-net-",
+		labelValue:  netCheckJobLabelValue,
+		resourceCfg: c.cfg.Jobs,
+		checkMode:   CheckModeRDMANode,
+		setRDMAType: true,
+	}); err != nil {
+		t.Fatalf("deployNodeCheckJobs() error = %v", err)
+	}
+
+	jobs, _ := client.BatchV1().Jobs(c.opts.Namespace).List(context.Background(), metav1.ListOptions{})
+	container := jobs.Items[0].Spec.Template.Spec.Containers[0]
+	efaQty := container.Resources.Requests[config.EFAResourceName]
+	if efaQty.Value() != 16 {
+		t.Errorf("EFA requests = %d, want 16 (config override)", efaQty.Value())
+	}
+}
+
+func TestDeployNodeCheckJobs_NoEFAOnNonEKS(t *testing.T) {
+	client := fake.NewSimpleClientset() //nolint:staticcheck
+	c, _ := newTestController(client)
+	c.platform = config.PlatformCoreWeave
+	c.gpuNodes = []string{"gpu-node"}
+	c.gpuCounts = map[string]int64{"gpu-node": 8}
+	c.efaCounts = map[string]int64{"gpu-node": 32}
+	c.gpuResource = "nvidia.com/gpu"
+	c.opts.Image = "validator:test"
+	c.cfg.Jobs = config.ResourceConfig{
+		Requests: map[string]string{"cpu": "500m"},
+		RDMAType: "ib",
+	}
+
+	if err := c.deployNodeCheckJobs(context.Background(), nodeCheckJobSpec{
+		kind:        "RDMA node check",
+		namePrefix:  "rhaii-validate-net-",
+		labelValue:  netCheckJobLabelValue,
+		resourceCfg: c.cfg.Jobs,
+		checkMode:   CheckModeRDMANode,
+		setRDMAType: true,
+	}); err != nil {
+		t.Fatalf("deployNodeCheckJobs() error = %v", err)
+	}
+
+	jobs, _ := client.BatchV1().Jobs(c.opts.Namespace).List(context.Background(), metav1.ListOptions{})
+	container := jobs.Items[0].Spec.Template.Spec.Containers[0]
+	if qty, ok := container.Resources.Requests[config.EFAResourceName]; ok {
+		t.Errorf("non-EKS should not inject EFA, got %v", qty)
 	}
 }

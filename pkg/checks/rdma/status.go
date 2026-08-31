@@ -14,6 +14,10 @@ import (
 )
 
 // StatusCheck validates RDMA NIC link state and speed.
+//
+// IB and RoCE use ibstat (existing path). EFA/SRD (rdma_type=srd) uses sysfs
+// because ibstat returns no output for EFA devices on AWS p5 nodes. The same
+// sysfs port fields can be used for ib/roce in the future.
 type StatusCheck struct {
 	nodeName string
 	rdmaType config.RDMAType
@@ -33,8 +37,6 @@ func (c *StatusCheck) Run(ctx context.Context) checks.Result {
 		Name:     c.Name(),
 	}
 
-	// Enumerate verbs devices using the same logic as DevicesCheck, then
-	// check if any are genuinely RDMA-capable before running ibstat.
 	verbsDevices, err := listVerbsDevices(ctx)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -59,6 +61,40 @@ func (c *StatusCheck) Run(ctx context.Context) checks.Result {
 		return r
 	}
 
+	if c.rdmaType == config.RDMATypeSRD {
+		return c.runEFAStatus(ctx, r, verbsDevices)
+	}
+	return c.runIBStatStatus(ctx, r)
+}
+
+// runEFAStatus reads link state from sysfs for EFA devices. ibstat does not
+// list EFA NICs on AWS p5 nodes even when ibv_devices shows them.
+func (c *StatusCheck) runEFAStatus(ctx context.Context, r checks.Result, verbsDevices []string) checks.Result {
+	var efaDevs []string
+	for _, dev := range verbsDevices {
+		if hasRDMACapability(ctx, dev) && IsEFADevice(dev) {
+			efaDevs = append(efaDevs, dev)
+		}
+	}
+	if len(efaDevs) == 0 {
+		r.Status = checks.StatusWarn
+		r.Message = "No EFA devices found for rdma_type=srd link status check"
+		return r
+	}
+
+	nics, err := listNICStatusFromSysfs(ctx, efaDevs)
+	if err != nil {
+		r.Status = checks.StatusFail
+		r.Message = fmt.Sprintf("sysfs NIC status read failed: %v", err)
+		r.Remediation = "Check RDMA driver and device plugin installation"
+		return r
+	}
+
+	r.Details = map[string]any{"nics": nics}
+	return c.summarizeStatus(r, nics, "sysfs")
+}
+
+func (c *StatusCheck) runIBStatStatus(ctx context.Context, r checks.Result) checks.Result {
 	output, err := exec.CommandContext(ctx, "ibstat").Output()
 	if err != nil {
 		r.Status = checks.StatusFail
@@ -75,7 +111,10 @@ func (c *StatusCheck) Run(ctx context.Context) checks.Result {
 	}
 
 	r.Details = map[string]any{"nics": nics}
+	return c.summarizeStatus(r, nics, "ibstat")
+}
 
+func (c *StatusCheck) summarizeStatus(r checks.Result, nics []NICStatusInfo, source string) checks.Result {
 	var targetActive, targetDown, otherActive, otherDown []string
 	for _, nic := range nics {
 		isTarget := c.isTargetNIC(nic)
@@ -95,25 +134,18 @@ func (c *StatusCheck) Run(ctx context.Context) checks.Result {
 		}
 	}
 
-	// Summarize non-target NICs (different link layer than rdma_type).
-	// Shown in all cases so the user can spot rdma_type misconfiguration.
 	otherNote := ""
 	otherTotal := len(otherActive) + len(otherDown)
 	if otherTotal > 0 {
-		otherNote = fmt.Sprintf(" (other %s NICs: %d up, %d down)", c.otherRDMATypeLabel(), len(otherActive), len(otherDown))
+		otherNote = fmt.Sprintf(" (other NICs: %d up, %d down)", len(otherActive), len(otherDown))
 	}
 
-	// RDMA-capable devices exist (passed GID check above) but none match
-	// the configured rdma_type — likely a config mismatch, not HW failure.
 	if len(targetActive) == 0 && len(targetDown) == 0 {
 		r.Status = checks.StatusWarn
-		r.Message = fmt.Sprintf("No NICs matching rdma_type=%q found via ibstat", c.rdmaType) + otherNote
+		r.Message = fmt.Sprintf("No NICs matching rdma_type=%q found via %s", c.rdmaType, source) + otherNote
 		return r
 	}
 
-	// All target NICs down → FAIL (hardware/cable issue).
-	// Some target NICs down → WARN (partial degradation).
-	// All target NICs active → PASS.
 	if len(targetDown) > 0 && len(targetActive) == 0 {
 		r.Status = checks.StatusFail
 		r.Message = fmt.Sprintf("All %s NIC(s) down: %s", c.rdmaTypeLabel(), strings.Join(targetDown, ", ")) + otherNote
@@ -130,6 +162,13 @@ func (c *StatusCheck) Run(ctx context.Context) checks.Result {
 	return r
 }
 
+func (c *StatusCheck) rdmaTypeLabel() string {
+	if c.rdmaType == "" {
+		return "RDMA"
+	}
+	return string(c.rdmaType)
+}
+
 // isTargetNIC returns true if the NIC matches the configured rdma_type.
 // If rdma_type is empty, all NICs are targets.
 func (c *StatusCheck) isTargetNIC(nic NICStatusInfo) bool {
@@ -142,28 +181,22 @@ func (c *StatusCheck) isTargetNIC(nic NICStatusInfo) bool {
 	if c.rdmaType == config.RDMATypeRoCE {
 		return nic.LinkLayer == string(checks.LinkLayerEthernet)
 	}
+	if c.rdmaType == config.RDMATypeSRD {
+		return IsEFADevice(efaDeviceFromPortName(nic.Name))
+	}
 	return true
 }
 
-func (c *StatusCheck) rdmaTypeLabel() string {
-	if c.rdmaType == "" {
-		return "RDMA"
+// efaDeviceFromPortName returns the HCA device name for IsEFADevice lookup.
+// Sysfs port status uses "dev/portN" names; EFA PCI sysfs is keyed by dev.
+func efaDeviceFromPortName(name string) string {
+	if idx := strings.Index(name, "/port"); idx >= 0 {
+		return name[:idx]
 	}
-	return string(c.rdmaType)
+	return name
 }
 
-func (c *StatusCheck) otherRDMATypeLabel() string {
-	switch c.rdmaType {
-	case config.RDMATypeIB:
-		return string(config.RDMATypeRoCE)
-	case config.RDMATypeRoCE:
-		return string(config.RDMATypeIB)
-	default:
-		return "non-matching"
-	}
-}
-
-// NICStatusInfo holds parsed ibstat information for a single NIC port.
+// NICStatusInfo holds parsed NIC port information from ibstat or sysfs.
 type NICStatusInfo struct {
 	Name      string `json:"name"`
 	State     string `json:"state"`

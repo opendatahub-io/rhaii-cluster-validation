@@ -117,7 +117,11 @@ const zeroGID = "0000:0000:0000:0000:0000:0000:0000:0000"
 // device (e.g. Azure Accelerated Networking SR-IOV VFs that expose mlx5_ib
 // entries but have no actual RDMA transport).
 //
-// Detection strategy (per port):
+// Detection strategy:
+//  0. EFA PCI vendor/device (AWS) → capable; EFA ports may have empty GIDs.
+//     Note: EFA RDMA-capable ≠ GPUDirect RDMA. Some EKS SKUs (e.g. p5.4xlarge)
+//     have EFA for host fabric but not GPUDirect; that affects --use_cuda
+//     bandwidth jobs, not whether the NIC counts here.
 //  1. InfiniBand link_layer → immediately capable (IB devices are always
 //     RDMA-capable regardless of link state or GID table).
 //  2. Ethernet link_layer (RoCE) → check gid_attrs/ndevs/ for a netdev
@@ -128,6 +132,10 @@ const zeroGID = "0000:0000:0000:0000:0000:0000:0000:0000"
 //  3. GID scan fallback → for older kernels that may not expose gid_attrs,
 //     scan all GID entries for any non-zero value.
 func hasRDMACapability(_ context.Context, dev string) bool {
+	if IsEFADevice(dev) {
+		return true
+	}
+
 	portsPath := filepath.Join("/sys/class/infiniband", dev, "ports")
 	ports, err := os.ReadDir(portsPath)
 	if err != nil {

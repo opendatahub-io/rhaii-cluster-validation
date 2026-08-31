@@ -125,11 +125,7 @@ func FormatTable(w io.Writer, platform string, r Report, storedHint string) bool
 				fmt.Fprintln(w, "GPU-NIC Topology:")
 				hasTopology = true
 			}
-			var pairDescs []string
-			for _, p := range topo.Pairs {
-				pairDescs = append(pairDescs, fmt.Sprintf("GPU%d↔%s(NUMA:%d↔%d)", p.GPU.ID, p.NIC.Dev, p.GPU.NUMA, p.NIC.NUMA))
-			}
-			fmt.Fprintf(w, "  %s: %s\n", report.Node, strings.Join(pairDescs, ", "))
+			fmt.Fprintf(w, "  %s: %s\n", report.Node, rdma.FormatPairsCompact(topo.Pairs, topo.PairingStrategy))
 		}
 	}
 

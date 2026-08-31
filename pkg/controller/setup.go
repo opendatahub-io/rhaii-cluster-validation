@@ -83,6 +83,7 @@ func (c *Controller) detectAndCreateConfig(ctx context.Context) error {
 
 func (c *Controller) discoverGPUNodes(ctx context.Context) ([]string, error) {
 	c.gpuCounts = make(map[string]int64)
+	c.efaCounts = make(map[string]int64)
 
 	// Try label-based discovery first
 	for _, gs := range config.GPUNodeSelectors {
@@ -105,6 +106,11 @@ func (c *Controller) discoverGPUNodes(ctx context.Context) ([]string, error) {
 				}
 				names = append(names, node.Name)
 				c.gpuCounts[node.Name] = count
+				if c.platform == config.PlatformEKS {
+					if efa := config.EFACountFromAllocatable(node.Status.Allocatable); efa > 0 {
+						c.efaCounts[node.Name] = efa
+					}
+				}
 			}
 			fmt.Fprintf(c.output, "  GPU vendor: %s (auto-detected from node labels)\n", gs.Vendor)
 			return c.filterNodes(names), nil
@@ -122,6 +128,11 @@ func (c *Controller) discoverGPUNodes(ctx context.Context) ([]string, error) {
 			if qty, ok := node.Status.Allocatable[resName]; ok && qty.Value() > 0 {
 				names = append(names, node.Name)
 				c.gpuCounts[node.Name] = qty.Value()
+				if c.platform == config.PlatformEKS {
+					if efa := config.EFACountFromAllocatable(node.Status.Allocatable); efa > 0 {
+						c.efaCounts[node.Name] = efa
+					}
+				}
 				if c.gpuVendor == "" {
 					c.gpuVendor = config.GPUVendorFromResourceName(resName)
 					c.gpuResource = resName

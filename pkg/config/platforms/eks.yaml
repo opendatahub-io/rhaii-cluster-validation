@@ -7,6 +7,9 @@ agent:
   annotations: {}
 
 jobs:
+  # EFA (vpc.amazonaws.com/efa) is a per-device count on EKS (not a boolean like
+  # CoreWeave rdma/ib). Omit from jobs.requests to auto-detect each node's full
+  # allocatable count on rdma-node. Set explicitly to override.
   requests:
     cpu: "500m"
     memory: "512Mi"

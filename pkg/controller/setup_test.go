@@ -165,6 +165,49 @@ func TestDiscoverGPUNodes_NoGPUs(t *testing.T) {
 	}
 }
 
+func gpuNodeWithEFA(name string, labels map[string]string, gpuResource corev1.ResourceName, gpuCount, efaCount int64) *corev1.Node {
+	node := gpuNode(name, labels, gpuResource, gpuCount)
+	if efaCount > 0 {
+		node.Status.Allocatable[config.EFAResourceName] = *resource.NewQuantity(efaCount, resource.DecimalSI)
+	}
+	return node
+}
+
+func TestDiscoverGPUNodes_EFACountsOnEKS(t *testing.T) {
+	client := fake.NewSimpleClientset( //nolint:staticcheck
+		gpuNodeWithEFA("p5-node", map[string]string{"nvidia.com/gpu.present": "true"}, "nvidia.com/gpu", 8, 32),
+	)
+	c, _ := newTestController(client)
+	c.platform = config.PlatformEKS
+
+	nodes, err := c.discoverGPUNodes(context.Background())
+	if err != nil {
+		t.Fatalf("discoverGPUNodes() error = %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node, got %v", nodes)
+	}
+	if c.efaCounts["p5-node"] != 32 {
+		t.Errorf("efaCounts = %d, want 32", c.efaCounts["p5-node"])
+	}
+}
+
+func TestDiscoverGPUNodes_NoEFACountsOffEKS(t *testing.T) {
+	client := fake.NewSimpleClientset( //nolint:staticcheck
+		gpuNodeWithEFA("gpu-node", map[string]string{"nvidia.com/gpu.present": "true"}, "nvidia.com/gpu", 8, 32),
+	)
+	c, _ := newTestController(client)
+	c.platform = config.PlatformCoreWeave
+
+	_, err := c.discoverGPUNodes(context.Background())
+	if err != nil {
+		t.Fatalf("discoverGPUNodes() error = %v", err)
+	}
+	if len(c.efaCounts) != 0 {
+		t.Errorf("expected no EFA counts off EKS, got %v", c.efaCounts)
+	}
+}
+
 func TestDiscoverGPUNodes_RespectsNodesFilter(t *testing.T) {
 	client := fake.NewSimpleClientset( //nolint:staticcheck
 		gpuNode("gpu-node-1", map[string]string{"nvidia.com/gpu.present": "true"}, "nvidia.com/gpu", 8),

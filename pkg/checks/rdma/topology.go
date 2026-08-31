@@ -61,7 +61,7 @@ func (c *TopologyCheck) Run(ctx context.Context) checks.Result {
 		return r
 	}
 
-	pairs, flat, strategy := buildPairs(gpus, nics)
+	pairs, flat, strategy := buildPairs(gpus, nics, c.rdmaType)
 
 	var mappings []string
 	for _, p := range pairs {
@@ -96,12 +96,8 @@ func (c *TopologyCheck) Run(ctx context.Context) checks.Result {
 		r.Status = checks.StatusPass
 	}
 
-	var pairDescs []string
-	for _, p := range pairs {
-		pairDescs = append(pairDescs, fmt.Sprintf("GPU%d↔%s(NUMA:%d↔%d)", p.GPU.ID, p.NIC.Dev, p.GPU.NUMA, p.NIC.NUMA))
-	}
 	r.Message = fmt.Sprintf("%d GPU(s), %d NIC(s), strategy=%s: %s",
-		len(gpus), len(nics), strategy, strings.Join(pairDescs, ", "))
+		len(gpus), len(nics), strategy, FormatPairsCompact(pairs, strategy))
 
 	return r
 }
@@ -300,6 +296,9 @@ func discoverNICs(ctx context.Context, rdmaType config.RDMAType) ([]checks.NICIn
 		if rdmaType == config.RDMATypeRoCE && linkLayer != checks.LinkLayerEthernet {
 			continue
 		}
+		if rdmaType == config.RDMATypeSRD && !IsEFADevice(dev) {
+			continue
+		}
 
 		nics = append(nics, checks.NICInfo{Dev: dev, NUMA: numa, PCIAddr: pciAddr, LinkLayer: linkLayer, PCIePath: pciePath})
 	}
@@ -406,9 +405,23 @@ func hasPCIePaths(gpus []checks.GPUInfo, nics []checks.NICInfo) bool {
 // buildPairs dispatches to the appropriate pairing strategy based on
 // topology shape and GPU:NIC ratio. Returns pairs, isFlat flag, and
 // the strategy name.
-func buildPairs(gpus []checks.GPUInfo, nics []checks.NICInfo) ([]checks.GPUNICPair, bool, checks.PairingStrategy) {
+func buildPairs(gpus []checks.GPUInfo, nics []checks.NICInfo, rdmaType config.RDMAType) ([]checks.GPUNICPair, bool, checks.PairingStrategy) {
 	if len(nics) == 0 || len(gpus) == 0 {
 		return nil, true, checks.PairingNUMAAffinity
+	}
+
+	if len(gpus) == len(nics) {
+		flat := isFlat(gpus, nics)
+		if flat || !hasPCIePaths(gpus, nics) {
+			return numaAffinityPairing(gpus, nics), flat, checks.PairingNUMAAffinity
+		}
+		return pcieDistancePairing(gpus, nics), false, checks.PairingPCIeDistance
+	}
+
+	if rdmaType == config.RDMATypeSRD && (len(nics) > len(gpus)) {
+		if hasPCIePaths(gpus, nics) {
+			return multiNICPCIePairing(gpus, nics), false, checks.PairingMultiNICPCIe
+		}
 	}
 
 	flat := isFlat(gpus, nics)
@@ -420,8 +433,38 @@ func buildPairs(gpus []checks.GPUInfo, nics []checks.NICInfo) ([]checks.GPUNICPa
 		return pcieDistancePairing(gpus, nics), false, checks.PairingPCIeDistance
 	}
 
-	// GPUs > NICs: load-balance multiple GPUs across fewer NICs
 	return numaLoadBalancePairing(gpus, nics), false, checks.PairingNUMALoadBalance
+}
+
+// multiNICPCIePairing assigns each NIC to the closest GPU by PCIe tree
+// distance and emits one pair per (GPU, NIC). Pairs are sorted by
+// (gpu_id, nic_dev).
+func multiNICPCIePairing(gpus []checks.GPUInfo, nics []checks.NICInfo) []checks.GPUNICPair {
+	var pairs []checks.GPUNICPair
+	for _, nic := range nics {
+		bestGPU := gpus[0]
+		bestDist := unknownPathPenalty
+		for _, gpu := range gpus {
+			var dist int
+			if len(gpu.PCIePath) >= 2 && len(nic.PCIePath) >= 2 {
+				dist = pcieDistance(gpu.PCIePath, nic.PCIePath)
+			} else {
+				dist = unknownPathPenalty
+			}
+			if dist < bestDist || (dist == bestDist && gpu.ID < bestGPU.ID) {
+				bestDist = dist
+				bestGPU = gpu
+			}
+		}
+		pairs = append(pairs, makePair(bestGPU, nic, bestDist))
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].GPU.ID != pairs[j].GPU.ID {
+			return pairs[i].GPU.ID < pairs[j].GPU.ID
+		}
+		return pairs[i].NIC.Dev < pairs[j].NIC.Dev
+	})
+	return pairs
 }
 
 // numaAffinityPairing pairs GPUs to NICs by NUMA affinity with ordered matching.
