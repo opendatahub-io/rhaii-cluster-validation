@@ -170,6 +170,31 @@ func TestNewPingMeshJobRejectsNoValidDevices(t *testing.T) {
 	}
 }
 
+func TestPingMeshJobFiltersMixedDeviceLists(t *testing.T) {
+	rawServer := []string{"ibp0", "../bad", "ibp1"}
+	rawClient := []string{"ibp0", "bad dev", "ibp1"}
+	j := NewPingMeshJob("a", "b", rawServer, rawClient, config.RDMATypeSRD, -1, 3, 10)
+	if err := j.ValidateDevices(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(j.ServerDevices) != 2 || len(j.ClientDevices) != 2 {
+		t.Fatalf("filtered devices = %v / %v, want 2 each", j.ServerDevices, j.ClientDevices)
+	}
+
+	serverScript := j.serverScript()[2]
+	clientScript := j.clientScript("10.0.0.1")[2]
+	// Server inner loop must use filtered client count (2 → seq 0 1), not raw (3 → seq 0 2).
+	if !strings.Contains(serverScript, "for cslot in $(seq 0 1)") {
+		t.Errorf("server script missing filtered client loop bound:\n%s", serverScript)
+	}
+	if strings.Contains(serverScript, "for cslot in $(seq 0 2)") {
+		t.Error("server script still uses raw client device count")
+	}
+	if !strings.Contains(clientScript, `CDEVS=("ibp0" "ibp1")`) {
+		t.Errorf("client script missing filtered CDEVS array:\n%s", clientScript)
+	}
+}
+
 func TestServerTimeout(t *testing.T) {
 	j := NewPingMeshJob("a", "b",
 		[]string{"ibp0", "ibp1"},

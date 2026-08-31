@@ -44,8 +44,8 @@ func NewPingMeshJob(serverNode, clientNode string, serverDevs, clientDevs []stri
 		timeout = defaultPingTimeout
 	}
 	return &PingMeshJob{
-		ServerDevices: serverDevs,
-		ClientDevices: clientDevs,
+		ServerDevices: filterValidDeviceNames(serverDevs),
+		ClientDevices: filterValidDeviceNames(clientDevs),
 		ServerNode:    serverNode,
 		ClientNode:    clientNode,
 		RDMAType:      rdmaType,
@@ -55,13 +55,13 @@ func NewPingMeshJob(serverNode, clientNode string, serverDevs, clientDevs []stri
 	}
 }
 
-// ValidateDevices returns an error when ServerDevices or ClientDevices are empty
-// or contain no names matching ValidDeviceName (e.g. after filteredDevices).
+// ValidateDevices returns an error when no valid RDMA devices remain after
+// NewPingMeshJob filters invalid names.
 func (j *PingMeshJob) ValidateDevices() error {
-	if j.validDeviceCount(j.ServerDevices) == 0 {
+	if len(j.ServerDevices) == 0 {
 		return fmt.Errorf("pingmesh: no valid server RDMA devices")
 	}
-	if j.validDeviceCount(j.ClientDevices) == 0 {
+	if len(j.ClientDevices) == 0 {
 		return fmt.Errorf("pingmesh: no valid client RDMA devices")
 	}
 	return nil
@@ -128,7 +128,7 @@ func (j *PingMeshJob) validDeviceCount(devs []string) int {
 	return n
 }
 
-func (j *PingMeshJob) filteredDevices(devs []string) []string {
+func filterValidDeviceNames(devs []string) []string {
 	var out []string
 	for _, d := range devs {
 		if checks.ValidDeviceName.MatchString(d) {
@@ -150,7 +150,7 @@ func bashQuotedArray(name string, devs []string) string {
 }
 
 func (j *PingMeshJob) serverTimeout() int {
-	tests := j.validDeviceCount(j.ServerDevices) * j.validDeviceCount(j.ClientDevices)
+	tests := len(j.ServerDevices) * len(j.ClientDevices)
 	return tests*j.Timeout + defaultServerBufSec
 }
 
@@ -326,8 +326,8 @@ func (j *PingMeshJob) srdClientScript(serverIP string) []string {
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\nmkdir -p /tmp/pm\nexec 2>/tmp/pm/script_stderr.log\n\n")
 
-	sdevs := j.filteredDevices(j.ServerDevices)
-	cdevs := j.filteredDevices(j.ClientDevices)
+	sdevs := j.ServerDevices
+	cdevs := j.ClientDevices
 	sb.WriteString(bashQuotedArray("SDEVS", sdevs))
 	sb.WriteString("\n")
 	sb.WriteString(bashQuotedArray("CDEVS", cdevs))
