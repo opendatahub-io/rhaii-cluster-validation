@@ -11,8 +11,7 @@ import (
 
 // applyAutoEFA injects vpc.amazonaws.com/efa for node on EKS unless jobs
 // config already specifies EFA. Returns the count applied (0 if none).
-// Used by rdma-node per-node check jobs only; pingmesh/bandwidth follow-up
-// tracked in .cursor/plans/eks_rdma_multinode_followup.plan.md.
+// Used by rdma-node per-node check jobs.
 func (c *Controller) applyAutoEFA(container *corev1.Container, nodeName string) int64 {
 	if c.platform != config.PlatformEKS || config.ResourceConfigHasEFA(c.cfg.Jobs) {
 		return 0
