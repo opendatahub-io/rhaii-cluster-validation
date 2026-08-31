@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -104,14 +103,10 @@ func readPortStatus(dev, portNum, portPath string) (NICStatusInfo, bool) {
 
 func readSysfsPortFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
-	if err == nil {
-		return string(data), nil
-	}
-	out, execErr := exec.Command("cat", path).Output()
-	if execErr != nil {
+	if err != nil {
 		return "", err
 	}
-	return string(out), nil
+	return string(data), nil
 }
 
 func portStatusName(dev, portNum string) string {
