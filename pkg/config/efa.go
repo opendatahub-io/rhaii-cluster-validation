@@ -1,6 +1,9 @@
 package config
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+)
 
 // EFAResourceName is the Kubernetes extended resource for AWS EFA devices.
 //
@@ -39,4 +42,18 @@ func AutoEFACount(nodeAllocatable corev1.ResourceList, configHasEFA bool, config
 	}
 	// Auto-detect from node allocatable
 	return EFACountFromAllocatable(nodeAllocatable)
+}
+
+// parseEFACountQuantity parses a configured EFA quantity string. Returns a positive
+// integral count, or 0 for malformed, fractional, or negative values.
+func parseEFACountQuantity(s string) int64 {
+	qty, err := resource.ParseQuantity(s)
+	if err != nil || qty.Sign() < 0 {
+		return 0
+	}
+	n, ok := qty.AsInt64()
+	if !ok || n <= 0 {
+		return 0
+	}
+	return n
 }

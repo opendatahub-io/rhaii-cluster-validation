@@ -69,16 +69,15 @@ func (c *ResourceConfig) GetPingGIDIndex() int {
 	return -1
 }
 
-// GetEFACount returns the configured EFA device count from requests, or 0 if not set.
+// GetEFACount returns the configured EFA device count from jobs requests or limits,
+// or 0 when unset or not a positive integral quantity.
 func (c *ResourceConfig) GetEFACount() int64 {
-	efaQty, ok := c.Requests[string(EFAResourceName)]
-	if !ok {
-		return 0
+	key := string(EFAResourceName)
+	if v, ok := c.Requests[key]; ok {
+		return parseEFACountQuantity(v)
 	}
-	// Parse the quantity (e.g., "32" or "8")
-	var q int64
-	if _, err := fmt.Sscanf(efaQty, "%d", &q); err == nil {
-		return q
+	if v, ok := c.Limits[key]; ok {
+		return parseEFACountQuantity(v)
 	}
 	return 0
 }
