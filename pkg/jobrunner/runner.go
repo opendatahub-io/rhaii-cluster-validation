@@ -592,7 +592,12 @@ func (r *Runner) cleanup(ctx context.Context, jobs []*batchv1.Job) {
 	for i := 0; i < 60; i++ {
 		allGone := true
 		for _, j := range jobs {
-			if _, err := r.client.BatchV1().Jobs(r.namespace).Get(ctx, j.Name, metav1.GetOptions{}); err == nil {
+			_, err := r.client.BatchV1().Jobs(r.namespace).Get(ctx, j.Name, metav1.GetOptions{})
+			if err == nil {
+				allGone = false
+				break
+			}
+			if !apierrors.IsNotFound(err) {
 				allGone = false
 				break
 			}
