@@ -1,6 +1,9 @@
 package rdma
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
@@ -156,4 +159,150 @@ func TestServerTimeout(t *testing.T) {
 	if got := j.serverTimeout(); got != 70 {
 		t.Errorf("serverTimeout = %d, want 70", got)
 	}
+}
+
+func TestPingMeshJobScripts(t *testing.T) {
+	serverDevs := []string{"ibp0", "ibp1"}
+	clientDevs := []string{"ibp0", "ibp1"}
+
+	t.Run("ibv server uses ibv_rc_pingpong", func(t *testing.T) {
+		j := NewPingMeshJob("a", "b", serverDevs, clientDevs, config.RDMATypeIB, -1, 3, 10)
+		script := j.serverScript()[2]
+		if !strings.Contains(script, "ibv_rc_pingpong") {
+			t.Error("expected ibv_rc_pingpong in IB server script")
+		}
+		if strings.Contains(script, "fi_rdm_pingpong") {
+			t.Error("unexpected fi_rdm_pingpong in IB server script")
+		}
+		if !strings.Contains(script, "-n 3") {
+			t.Error("expected -n 3 in IB server script")
+		}
+	})
+
+	t.Run("ibv client uses ibv_rc_pingpong", func(t *testing.T) {
+		j := NewPingMeshJob("a", "b", serverDevs, clientDevs, config.RDMATypeIB, -1, 3, 10)
+		script := j.clientScript("10.0.0.1")[2]
+		if !strings.Contains(script, "ibv_rc_pingpong") {
+			t.Error("expected ibv_rc_pingpong in IB client script")
+		}
+		if strings.Contains(script, "fi_rdm_pingpong") {
+			t.Error("unexpected fi_rdm_pingpong in IB client script")
+		}
+		if !strings.Contains(script, "-n 3 10.0.0.1") {
+			t.Error("expected -n 3 and server IP in IB client script")
+		}
+	})
+
+	t.Run("srd server uses fi_rdm_pingpong", func(t *testing.T) {
+		j := NewPingMeshJob("a", "b", serverDevs, clientDevs, config.RDMATypeSRD, -1, 3, 10)
+		script := j.serverScript()[2]
+		if !strings.Contains(script, "fi_rdm_pingpong") {
+			t.Error("expected fi_rdm_pingpong in SRD server script")
+		}
+		if strings.Contains(script, "ibv_rc_pingpong") {
+			t.Error("unexpected ibv_rc_pingpong in SRD server script")
+		}
+		if !strings.Contains(script, "-p efa") {
+			t.Error("expected -p efa provider in SRD server script")
+		}
+		if !strings.Contains(script, "FI_EFA_IFACE=$sdev") {
+			t.Error("expected FI_EFA_IFACE in SRD server script")
+		}
+		if !strings.Contains(script, "-E=$((18515 + idx))") {
+			t.Error("expected OOB port -E in SRD server script")
+		}
+		if !strings.Contains(script, "-S 64") {
+			t.Error("expected -S 64 message size in SRD server script")
+		}
+		if !strings.Contains(script, "-I 3") {
+			t.Error("expected -I 3 in SRD server script")
+		}
+		if strings.Contains(script, "find_rocev2_gid") {
+			t.Error("SRD server script should not use GID discovery")
+		}
+	})
+
+	t.Run("srd client uses fi_rdm_pingpong", func(t *testing.T) {
+		j := NewPingMeshJob("a", "b", serverDevs, clientDevs, config.RDMATypeSRD, -1, 3, 10)
+		script := j.clientScript("10.0.0.1")[2]
+		if !strings.Contains(script, "fi_rdm_pingpong") {
+			t.Error("expected fi_rdm_pingpong in SRD client script")
+		}
+		if strings.Contains(script, "ibv_rc_pingpong") {
+			t.Error("unexpected ibv_rc_pingpong in SRD client script")
+		}
+		if !strings.Contains(script, "-p efa") {
+			t.Error("expected -p efa provider in SRD client script")
+		}
+		if !strings.Contains(script, "FI_EFA_IFACE=$cdev") {
+			t.Error("expected FI_EFA_IFACE per client NIC in SRD client script")
+		}
+		if !strings.Contains(script, "SDEVS=(") || !strings.Contains(script, "CDEVS=(") {
+			t.Error("expected device arrays in SRD client script")
+		}
+		if !strings.Contains(script, "-E=$((18515 + idx))") {
+			t.Error("expected OOB port -E in SRD client script")
+		}
+		if !strings.Contains(script, "-S 64") {
+			t.Error("expected -S 64 message size in SRD client script")
+		}
+		if !strings.Contains(script, "-I 3 10.0.0.1") {
+			t.Error("expected -I 3 and server IP in SRD client script")
+		}
+		if !strings.Contains(script, "wait\n") {
+			t.Error("expected parallel client with wait in SRD client script")
+		}
+	})
+
+	t.Run("default iterations is 3", func(t *testing.T) {
+		j := NewPingMeshJob("a", "b", serverDevs, clientDevs, config.RDMATypeSRD, -1, 0, 10)
+		if j.Iterations != 3 {
+			t.Errorf("Iterations = %d, want 3 (default)", j.Iterations)
+		}
+		script := j.clientScript("10.0.0.1")[2]
+		if !strings.Contains(script, "-I 3") {
+			t.Error("expected default -I 3 in SRD client script")
+		}
+	})
+}
+
+func TestClientScriptSize32x32(t *testing.T) {
+	devs := make([]string, 32)
+	for i := range devs {
+		devs[i] = fmt.Sprintf("rdmap%ds0", 79+i)
+	}
+	j := NewPingMeshJob("server", "client", devs, devs, config.RDMATypeSRD, -1, 3, 10)
+	script := j.clientScript("10.0.0.1")[2]
+	const maxScriptBytes = 128 * 1024 // stay well under typical ARG_MAX (~2MB)
+	if len(script) > maxScriptBytes {
+		t.Errorf("32x32 client script = %d bytes, want <= %d (unrolled scripts hit ARG_MAX)", len(script), maxScriptBytes)
+	}
+	t.Logf("32x32 client script size: %d bytes", len(script))
+}
+
+// TestDump32x32Scripts writes generated pingmesh scripts to /tmp for manual pod testing.
+// Usage: DUMP_PINGMESH_SCRIPTS=1 DEVS="rdmap79s0 ..." SERVER_IP=10.0.0.1 go test -run TestDump32x32Scripts -count=1
+func TestDump32x32Scripts(t *testing.T) {
+	if os.Getenv("DUMP_PINGMESH_SCRIPTS") == "" {
+		t.Skip("set DUMP_PINGMESH_SCRIPTS=1 to generate scripts")
+	}
+	devs := strings.Fields(os.Getenv("DEVS"))
+	if len(devs) == 0 {
+		t.Fatal("DEVS env required")
+	}
+	serverIP := os.Getenv("SERVER_IP")
+	if serverIP == "" {
+		t.Fatal("SERVER_IP env required")
+	}
+	j := NewPingMeshJob("server-test", "client-test", devs, devs, config.RDMATypeSRD, -1, 3, 10)
+	serverScript := j.serverScript()[2]
+	clientScript := j.clientScript(serverIP)[2]
+	if err := os.WriteFile("/tmp/pingmesh_server.sh", []byte(serverScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("/tmp/pingmesh_client.sh", []byte(clientScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("wrote /tmp/pingmesh_server.sh (%d bytes, %d devs)", len(serverScript), len(devs))
+	t.Logf("wrote /tmp/pingmesh_client.sh (%d bytes)", len(clientScript))
 }

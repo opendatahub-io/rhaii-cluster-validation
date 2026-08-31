@@ -47,8 +47,10 @@ const (
 type LinkLayer string
 
 const (
+	LinkLayerUnknown    LinkLayer = "Unknown"
 	LinkLayerInfiniBand LinkLayer = "InfiniBand"
 	LinkLayerEthernet   LinkLayer = "Ethernet"
+	LinkLayerSRD        LinkLayer = "SRD"
 )
 
 // PairingStrategy identifies the algorithm used to pair GPUs with NICs.

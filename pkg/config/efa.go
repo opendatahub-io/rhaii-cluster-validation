@@ -28,3 +28,15 @@ func ResourceConfigHasEFA(cfg ResourceConfig) bool {
 	_, ok := cfg.Limits[key]
 	return ok
 }
+
+// AutoEFACount determines the EFA device count to request for a node.
+// If a config override is set (via ConfigMap or platform config), use that;
+// otherwise use the node's allocatable EFA count. Returns 0 if EFA is not available.
+func AutoEFACount(nodeAllocatable corev1.ResourceList, configHasEFA bool, configValue int64) int64 {
+	// Config override takes precedence
+	if configHasEFA && configValue > 0 {
+		return configValue
+	}
+	// Auto-detect from node allocatable
+	return EFACountFromAllocatable(nodeAllocatable)
+}

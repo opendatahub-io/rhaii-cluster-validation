@@ -8,6 +8,7 @@ import (
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks/rdma"
+	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/config"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/jobrunner"
 
 	corev1 "k8s.io/api/core/v1"
@@ -86,6 +87,19 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 			pmJob.SetPodConfig(rdmaCfg)
 			pmJob.SetServerImage(toolsImage)
 			pmJob.SetClientImage(toolsImage)
+
+			// Inject EFA resources if using EFA RDMA type
+			if rdmaType == config.RDMATypeSRD {
+				// Get allocatable resources for server node to determine EFA count
+				serverNode, err := c.client.CoreV1().Nodes().Get(ctx, serverNode, metav1.GetOptions{})
+				if err == nil {
+					efaCount := config.AutoEFACount(serverNode.Status.Allocatable, config.ResourceConfigHasEFA(c.cfg.Jobs), c.cfg.Jobs.GetEFACount())
+					if efaCount > 0 {
+						pmJob.SetExtendedResource(string(config.EFAResourceName), fmt.Sprintf("%d", efaCount))
+					}
+				}
+			}
+
 			jobMap[pair] = pmJob
 		}
 	}

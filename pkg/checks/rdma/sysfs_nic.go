@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 )
 
 // sysfsNICRoot is the sysfs infiniband class path (overridable in tests).
@@ -97,6 +99,9 @@ func readPortStatus(dev, portNum, portPath string) (NICStatusInfo, bool) {
 	}
 	if llRaw, err := readSysfsPortFile(filepath.Join(portPath, "link_layer")); err == nil {
 		nic.LinkLayer = strings.TrimSpace(llRaw)
+	}
+	if nic.LinkLayer == string(checks.LinkLayerUnknown) && IsEFADevice(dev) {
+		nic.LinkLayer = string(checks.LinkLayerSRD)
 	}
 	return nic, true
 }
