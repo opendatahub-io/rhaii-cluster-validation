@@ -3,12 +3,15 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks/rdma"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/config"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/jobrunner"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func (c *Controller) runBandwidthJobs(ctx context.Context, gpuNodes []string, reports []checks.NodeReport) ([]jobrunner.JobResult, error) {
@@ -74,6 +77,7 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 	rdmaAvailable := len(topo.Pairs) > 0
 
 	var jobs []jobrunner.Job
+	var skipResults []jobrunner.JobResult
 	for _, job := range c.jobs {
 		if job.Name() != "ib-write-bw" {
 			jobs = append(jobs, job)
@@ -95,6 +99,32 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 			origPodCfg = orig.PodCfg
 			origServerImg = orig.ServerImage
 			origClientImg = orig.ClientImage
+		}
+
+		// Resolve the fabric from only the GPU nodes participating in this run
+		// The registered ib-write-bw job is the common RDMA bandwidth placeholder
+		// SRD replaces it with EFA jobs while IB/RoCE continues through the existing path
+		selectedTopo := make(map[string]*checks.NodeTopology, len(gpuNodes))
+		for _, node := range gpuNodes {
+			if selected, ok := topoMap[node]; ok {
+				selectedTopo[node] = selected
+			}
+		}
+		rdmaType, err := rdma.ResolveRDMAType(c.cfg.Jobs.RDMAType, selectedTopo)
+		if err != nil {
+			skipResults = append(skipResults, jobrunner.JobResult{
+				JobName: "ib-write-bw",
+				Status:  checks.StatusSkip,
+				Message: fmt.Sprintf("RDMA bandwidth skipped: cannot resolve fabric type: %v", err),
+			})
+			continue
+		}
+
+		if rdmaType == config.RDMATypeSRD {
+			efaJobs, efaSkips := c.expandEFABandwidthJobs(ctx, gpuNodes, selectedTopo, origPodCfg, origServerImg, origClientImg)
+			jobs = append(jobs, efaJobs...)
+			skipResults = append(skipResults, efaSkips...)
+			continue
 		}
 
 		// GPUDirect RDMA: request all GPUs so the NVIDIA container runtime
@@ -158,7 +188,161 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 		}
 	}
 
-	return jobs, nil
+	return jobs, skipResults
+}
+
+// expandEFABandwidthJobs converts each node's EFA topology into bandwidth jobs
+// First it groups PCIe-aligned NICs by GPU on every selected node
+// It then creates one isolated PD job per compatible GPU group and finally one
+// WEP job containing all compatible groups in a stable order
+func (c *Controller) expandEFABandwidthJobs(ctx context.Context, gpuNodes []string, topoMap map[string]*checks.NodeTopology, basePodCfg *jobrunner.PodConfig, serverImage, clientImage string) ([]jobrunner.Job, []jobrunner.JobResult) {
+	// groupsByNode[node][gpuID] is the NIC/GPU lane group used to build both
+	// endpoints of that GPU's PD job later in this function
+	groupsByNode := make(map[string]map[int][]rdma.EFABandwidthLane, len(gpuNodes))
+	// Each pod requests all GPUs and EFAs so CUDA indices and EFA interfaces
+	// remain visible even though a PD job exercises only one aligned group
+	podCfgByNode := make(map[string]*jobrunner.PodConfig, len(gpuNodes))
+	// The union of GPU IDs provides deterministic PD and WEP construction order
+	gpuIDs := make(map[int]bool)
+
+	// Build and validate the per-node GPU groups from stored topology
+	for _, nodeName := range gpuNodes {
+		topo := topoMap[nodeName]
+		if topo == nil {
+			return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: fmt.Sprintf("EFA bandwidth skipped: no topology for node %s", nodeName)}}
+		}
+
+		groups := make(map[int][]rdma.EFABandwidthLane)
+		seenDevices := make(map[string]bool)
+		for _, pair := range topo.Pairs {
+			if pair.GPU.ID < 0 {
+				return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: fmt.Sprintf("EFA bandwidth skipped: invalid GPU ID %d on node %s", pair.GPU.ID, nodeName)}}
+			}
+			if !checks.ValidDeviceName.MatchString(pair.NIC.Dev) {
+				return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: fmt.Sprintf("EFA bandwidth skipped: invalid device %q on node %s", pair.NIC.Dev, nodeName)}}
+			}
+			if seenDevices[pair.NIC.Dev] {
+				return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: fmt.Sprintf("EFA bandwidth skipped: device %s is assigned more than once on node %s", pair.NIC.Dev, nodeName)}}
+			}
+			seenDevices[pair.NIC.Dev] = true
+			groups[pair.GPU.ID] = append(groups[pair.GPU.ID], rdma.EFABandwidthLane{GPUID: pair.GPU.ID, Device: pair.NIC.Dev})
+			gpuIDs[pair.GPU.ID] = true
+		}
+		if len(seenDevices) == 0 {
+			return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: fmt.Sprintf("EFA bandwidth skipped: no GPU-paired EFA devices on node %s", nodeName)}}
+		}
+		for gpuID := range groups {
+			sort.Slice(groups[gpuID], func(i, j int) bool { return groups[gpuID][i].Device < groups[gpuID][j].Device })
+		}
+		groupsByNode[nodeName] = groups
+
+		node, err := c.client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: fmt.Sprintf("EFA bandwidth skipped: failed to get node %s for EFA count: %v", nodeName, err)}}
+		}
+		efaCount := config.AutoEFACount(node.Status.Allocatable, config.ResourceConfigHasEFA(c.cfg.Jobs), c.cfg.Jobs.GetEFACount())
+		if efaCount < int64(len(seenDevices)) {
+			return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: fmt.Sprintf("EFA bandwidth skipped: node %s requires %d EFA devices from topology but resource injection resolved %d", nodeName, len(seenDevices), efaCount)}}
+		}
+		gpuCount := c.gpuCounts[nodeName]
+		if gpuCount <= 0 {
+			return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: fmt.Sprintf("EFA bandwidth skipped: no allocatable GPU count for node %s", nodeName)}}
+		}
+		if c.gpuResource == "" {
+			return nil, []jobrunner.JobResult{{JobName: "efa-rma-bw", Status: checks.StatusSkip, Message: "EFA bandwidth skipped: GPU resource name is unavailable"}}
+		}
+
+		// Resource counts are node-specific but intentionally include every device
+		podCfg := basePodCfg.Clone()
+		if podCfg == nil {
+			podCfg = &jobrunner.PodConfig{}
+		}
+		if podCfg.ResourceRequests == nil {
+			podCfg.ResourceRequests = make(map[string]string)
+		}
+		if podCfg.ResourceLimits == nil {
+			podCfg.ResourceLimits = make(map[string]string)
+		}
+		podCfg.Privileged = false
+		podCfg.ResourceRequests[string(c.gpuResource)] = fmt.Sprintf("%d", gpuCount)
+		podCfg.ResourceLimits[string(c.gpuResource)] = fmt.Sprintf("%d", gpuCount)
+		podCfg.ResourceRequests[string(config.EFAResourceName)] = fmt.Sprintf("%d", efaCount)
+		podCfg.ResourceLimits[string(config.EFAResourceName)] = fmt.Sprintf("%d", efaCount)
+		podCfgByNode[nodeName] = podCfg
+	}
+
+	// Stable GPU ordering keeps PD execution and WEP lane-to-port assignment deterministic
+	sortedGPUIDs := make([]int, 0, len(gpuIDs))
+	for gpuID := range gpuIDs {
+		sortedGPUIDs = append(sortedGPUIDs, gpuID)
+	}
+	sort.Ints(sortedGPUIDs)
+
+	// Create one PD job per GPU only when every selected node has that group with
+	// the same lane count so server and client start matching fi_rma_bw processes
+	messageSize := c.cfg.Jobs.RDMA.MessageSize
+	var jobs []jobrunner.Job
+	var skips []jobrunner.JobResult
+	allGroupsCompatible := true
+	for _, gpuID := range sortedGPUIDs {
+		lanesByNode := make(map[string][]rdma.EFABandwidthLane, len(gpuNodes))
+		width := -1
+		compatible := true
+		for _, nodeName := range gpuNodes {
+			lanes := groupsByNode[nodeName][gpuID]
+			if len(lanes) == 0 || (width >= 0 && len(lanes) != width) {
+				compatible = false
+				break
+			}
+			width = len(lanes)
+			lanesByNode[nodeName] = lanes
+		}
+		if !compatible {
+			// A missing or differently sized group cannot form matching endpoints
+			// WEP is also unsafe because it is assembled from all PD groups below
+			allGroupsCompatible = false
+			skips = append(skips, jobrunner.JobResult{JobName: fmt.Sprintf("efa-rma-bw-gpu%d", gpuID), Status: checks.StatusSkip, Message: fmt.Sprintf("EFA GPU%d bandwidth skipped: group missing or NIC count differs across selected nodes", gpuID)})
+			continue
+		}
+
+		job := rdma.NewEFABandwidthJob(gpuID, false, c.cfg.Thresholds.RDMABandwidthPD.Pass, c.cfg.Thresholds.RDMABandwidthPD.Warn, lanesByNode, podCfgByNode)
+		if messageSize > 0 {
+			job.MessageSize = messageSize
+		}
+		job.ServerImage = serverImage
+		job.ClientImage = clientImage
+		jobs = append(jobs, job)
+		fmt.Fprintf(c.output, "  EFA PD job: GPU%d with %d NIC(s) per node\n", gpuID, width)
+	}
+
+	if !allGroupsCompatible {
+		skips = append(skips, jobrunner.JobResult{JobName: "efa-rma-bw-wep", Status: checks.StatusSkip, Message: "EFA WEP bandwidth skipped: GPU-NIC groups differ across selected nodes"})
+		return jobs, skips
+	}
+
+	// WEP requires the complete group layout to match across all selected nodes
+	// Flattening in sorted GPU order gives both endpoints identical lane slots and
+	// therefore identical per-lane ports while all endpoint NICs run together
+	wepLanesByNode := make(map[string][]rdma.EFABandwidthLane, len(gpuNodes))
+	for _, nodeName := range gpuNodes {
+		for _, gpuID := range sortedGPUIDs {
+			wepLanesByNode[nodeName] = append(wepLanesByNode[nodeName], groupsByNode[nodeName][gpuID]...)
+		}
+	}
+	if len(wepLanesByNode[gpuNodes[0]]) > 1 {
+		wepJob := rdma.NewEFABandwidthJob(-1, true, c.cfg.Thresholds.RDMABandwidthWEP.Pass, c.cfg.Thresholds.RDMABandwidthWEP.Warn, wepLanesByNode, podCfgByNode)
+		if messageSize > 0 {
+			wepJob.MessageSize = messageSize
+		}
+		wepJob.ServerImage = serverImage
+		wepJob.ClientImage = clientImage
+		jobs = append(jobs, wepJob)
+		fmt.Fprintf(c.output, "  EFA WEP job: %d NIC(s) per node in parallel\n", len(wepLanesByNode[gpuNodes[0]]))
+	} else {
+		skips = append(skips, jobrunner.JobResult{JobName: "efa-rma-bw-wep", Status: checks.StatusSkip, Message: "EFA WEP bandwidth skipped: need at least two NICs"})
+	}
+
+	return jobs, skips
 }
 
 // configureJobs applies GPU resources, thresholds, and images to all registered jobs.

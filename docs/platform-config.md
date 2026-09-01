@@ -28,7 +28,7 @@ agent:                               # Per-node check Job pods (GPU/RDMA checks)
   limits: {}                         # no cpu/memory limits
   annotations: {}
 
-jobs:                                # Bandwidth test pods (iperf3, ib_write_bw)
+jobs:                                # Bandwidth test pods (iperf3 and RDMA tools)
   requests:
     cpu: "500m"
     memory: "512Mi"
@@ -199,13 +199,15 @@ jobs:
   requests:
     cpu: "500m"
     memory: "512Mi"
-    vpc.amazonaws.com/efa: "1"
-  limits:
-    vpc.amazonaws.com/efa: "1"
+  limits: {}
 
 gpu:
   min_driver_version: "535.0"
 ```
+
+On EKS, `rdma-node` and `rdma-bandwidth` automatically request each node's
+full allocatable `vpc.amazonaws.com/efa` count. Set an explicit value under
+`jobs.requests` or `jobs.limits` only to override that behavior.
 
 > **Note on EFA/SRD connectivity testing (pingmesh):** the RDMA connectivity
 > mesh (`rdma-ping`) determines how many EFA NICs to request for a node pair

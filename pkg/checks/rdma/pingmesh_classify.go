@@ -6,50 +6,8 @@ import (
 	"time"
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
-	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/config"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/jobrunner"
 )
-
-// ResolvePingMeshRDMAType determines the RDMA type to use for pingmesh: the
-// configured type takes precedence, otherwise it's inferred from the link
-// layer of GPU-paired NICs across all node topologies.
-func ResolvePingMeshRDMAType(configuredType string, topoMap map[string]*checks.NodeTopology) (config.RDMAType, error) {
-	if rt := config.RDMAType(configuredType); rt == config.RDMATypeIB || rt == config.RDMATypeRoCE || rt == config.RDMATypeSRD {
-		return rt, nil
-	}
-
-	// Infer from paired NICs' link layers. Slim pairs don't carry LinkLayer,
-	// so look up each paired NIC device in the fully-deserialized NICList.
-	linkLayers := make(map[checks.LinkLayer]bool)
-	for _, topo := range topoMap {
-		nicByDev := make(map[string]checks.LinkLayer, len(topo.NICList))
-		for _, nic := range topo.NICList {
-			nicByDev[nic.Dev] = nic.LinkLayer
-		}
-		for _, pair := range topo.Pairs {
-			ll, ok := nicByDev[pair.NIC.Dev]
-			if !ok {
-				return "", fmt.Errorf("paired NIC %q not found in NICList for topology inference", pair.NIC.Dev)
-			}
-			linkLayers[ll] = true
-		}
-	}
-
-	switch {
-	case len(linkLayers) == 0:
-		return "", fmt.Errorf("no NIC link layer data in topology")
-	case len(linkLayers) > 1:
-		return "", fmt.Errorf("mixed link layer types detected in GPU-paired NICs; set jobs.rdma_type explicitly")
-	case linkLayers[checks.LinkLayerEthernet]:
-		return config.RDMATypeRoCE, nil
-	case linkLayers[checks.LinkLayerInfiniBand]:
-		return config.RDMATypeIB, nil
-	case linkLayers[checks.LinkLayerSRD]:
-		return config.RDMATypeSRD, nil
-	default:
-		return "", fmt.Errorf("unknown link layer type in topology")
-	}
-}
 
 // DevicesFromTopology extracts the list of unique NIC device names from topology Pairs.
 func DevicesFromTopology(topo *checks.NodeTopology) []string {

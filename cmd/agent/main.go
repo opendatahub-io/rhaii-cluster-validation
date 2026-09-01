@@ -34,7 +34,7 @@ func main() {
   rdma             - All RDMA checks (rdma-node + rdma-ping + rdma-bandwidth)
   rdma-node        - Per-node RDMA device, NIC status, and GPU-NIC topology checks
   rdma-ping        - RDMA connectivity mesh (pingmesh via ibv_rc_pingpong)
-  rdma-bandwidth   - RDMA bandwidth tests (ib_write_bw)
+  rdma-bandwidth   - RDMA bandwidth tests (ib_write_bw or EFA fi_rma_bw)
   all              - Everything (deps + gpu + network + rdma)
   deps             - Check CRDs and operator health`,
 	}
@@ -180,9 +180,10 @@ func newRDMABandwidthCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "rdma-bandwidth",
-		Short: "Run RDMA bandwidth tests (ib_write_bw)",
+		Short: "Run RDMA bandwidth tests (ib_write_bw or EFA fi_rma_bw)",
 		Long: `Runs RDMA bandwidth tests using topology from a previous rdma-node run.
 Requires 2+ GPU nodes. Uses stored report for GPU-NIC topology mapping.
+Uses fi_rma_bw for EFA/SRD and ib_write_bw for InfiniBand/RoCE.
 Does not include TCP tests (use 'network' for iperf3/TCP latency).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.CheckMode = controller.CheckModeRDMABandwidth
