@@ -207,6 +207,17 @@ gpu:
   min_driver_version: "535.0"
 ```
 
+> **Note on EFA/SRD connectivity testing (pingmesh):** the RDMA connectivity
+> mesh (`rdma-ping`) determines how many EFA NICs to request for a node pair
+> by reading only the *server* node's allocatable EFA count. This assumes
+> both nodes in a pair are the same EC2 instance type and therefore have the
+> same EFA NIC count — true within a single RDMA/SRD network domain (e.g. all
+> `p5` nodes), but not guaranteed across domains (e.g. `p5` and `p6` nodes
+> aren't expected to be in the same SRD domain and wouldn't normally be
+> paired for pingmesh anyway). If a node pair somehow mixes instance types
+> with different EFA counts, only the server's count is requested for both
+> pods.
+
 ## How to Find Your RDMA Resource Name
 
 ```bash

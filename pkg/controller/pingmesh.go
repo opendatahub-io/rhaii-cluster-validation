@@ -92,7 +92,16 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 			pmJob.SetServerImage(toolsImage)
 			pmJob.SetClientImage(toolsImage)
 
-			// Inject EFA resources if using EFA RDMA type
+			// Inject EFA resources if using EFA RDMA type. Without requesting
+			// vpc.amazonaws.com/efa the pod has no access to EFA interfaces, so
+			// fi_rdm_pingpong would fail anyway; skip the pair instead of deploying
+			// a job that's guaranteed to fail.
+			//
+			// EFA count is read from the server node only, on the assumption that
+			// node pairs are the same EC2 instance type (and thus have identical EFA
+			// NIC counts). This holds within a single RDMA/SRD network domain — e.g.
+			// all p5 nodes — but not across domains (e.g. p5 vs p6 aren't expected to
+			// be in the same domain, so they wouldn't be paired for pingmesh anyway).
 			if rdmaType == config.RDMATypeSRD {
 				node, err := c.client.CoreV1().Nodes().Get(ctx, serverNode, metav1.GetOptions{})
 				if err != nil {
@@ -100,9 +109,11 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 					continue
 				}
 				efaCount := config.AutoEFACount(node.Status.Allocatable, config.ResourceConfigHasEFA(c.cfg.Jobs), c.cfg.Jobs.GetEFACount())
-				if efaCount > 0 {
-					pmJob.SetExtendedResource(string(config.EFAResourceName), fmt.Sprintf("%d", efaCount))
+				if efaCount <= 0 {
+					fmt.Fprintf(c.output, "  Warning: no EFA devices available on server node %s, skipping pair %s↔%s\n", serverNode, serverNode, clientNode)
+					continue
 				}
+				pmJob.SetExtendedResource(string(config.EFAResourceName), fmt.Sprintf("%d", efaCount))
 			}
 
 			jobMap[pair] = pmJob
