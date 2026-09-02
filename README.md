@@ -440,7 +440,7 @@ Report:
 - GPU tools run on host via `chroot /host` (privileged per-node Jobs)
 - Bandwidth jobs use ring topology (every node tested as sender + receiver)
 - RDMA tests expanded per GPU-NIC pair using discovered topology
-- RDMA tests skipped when the required RDMA resources are unavailable
+- RDMA bandwidth-job expansion skipped when no GPU-paired RDMA NICs are found
 - Report stored in ConfigMap for persistence
 - Default images defined in `manifests/image-references/image-references.yaml` (embedded via `//go:embed`), overridable with env vars (`RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR`, `RELATED_IMAGE_RHAII_VALIDATOR_TOOLS`) or CLI flags (`--image`, `--tools-image`)
 
