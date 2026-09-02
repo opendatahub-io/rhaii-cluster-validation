@@ -75,7 +75,7 @@ Build and push both images:
 
 ```bash
 make container      IMG=$IMG            # validator image (Dockerfile.dev)
-make container-rdma IMG_TOOLS=$IMG_TOOLS # tools image: iperf3, ib_write_bw, ibv_rc_pingpong (tools/Dockerfile.dev)
+make container-rdma IMG_TOOLS=$IMG_TOOLS # tools image: iperf3 and RDMA tools (tools/Dockerfile.dev)
 make push           IMG=$IMG
 make push-rdma      IMG_TOOLS=$IMG_TOOLS
 ```
@@ -125,7 +125,7 @@ kubectl rhaii-validate deps            # API-only, no pods — quickest
 kubectl rhaii-validate gpu             # per-node GPU check jobs
 kubectl rhaii-validate rdma-node       # topology/devices; produces topology used by ping/bandwidth
 kubectl rhaii-validate rdma-ping       # connectivity mesh (needs rdma-node first)
-kubectl rhaii-validate rdma-bandwidth  # ib_write_bw per GPU-NIC pair (needs rdma-node first)
+kubectl rhaii-validate rdma-bandwidth  # ib_write_bw or EFA fi_rma_bw (needs rdma-node first)
 kubectl rhaii-validate all             # full end-to-end
 ```
 

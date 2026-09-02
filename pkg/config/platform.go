@@ -91,8 +91,10 @@ const (
 	RDMATypeSRD  RDMAType = "srd"
 )
 
-// RDMAJobConfig holds ib_write_bw test parameters.
-// Zero values mean "use defaults" (QPs=4, MessageSize=1MiB).
+// RDMAJobConfig holds RDMA bandwidth test parameters
+// A zero QPs or MessageSize value selects the implementation default
+// ib_write_bw defaults to QPs=4 and MessageSize=1MiB
+// EFA fi_rma_bw defaults to MessageSize=4MiB and does not use QPs
 type RDMAJobConfig struct {
 	QPs         int `yaml:"qps,omitempty" json:"qps,omitempty"`                   // Number of queue pairs
 	MessageSize int `yaml:"message_size,omitempty" json:"message_size,omitempty"` // Message size in bytes

@@ -10,7 +10,7 @@ Runs preflight checks on GPU clusters before deploying inference workloads. Vali
 - GPU-NIC NUMA topology (which GPU is closest to which NIC)
 - RDMA device presence and NIC link status
 - TCP bandwidth (iperf3) and latency between node pairs
-- RDMA bandwidth (ib_write_bw) per GPU-NIC pair
+- RDMA bandwidth (ib_write_bw for IB/RoCE, fi_rma_bw for EFA)
 
 **Supported platforms:** AKS, EKS, CoreWeave, OpenShift (auto-detected)
 
@@ -43,7 +43,7 @@ The tool will ensure the secret is linked to the `rhaii-validator` ServiceAccoun
 | Image                                        | Registry                                                            |
 | -------------------------------------------- | ------------------------------------------------------------------- |
 | Validator                                    | `registry.redhat.io/rhoai/odh-rhaii-cluster-validator-rhel9:v3.4.0` |
-| Tools (iperf3, ib_write_bw, ibv_rc_pingpong) | `registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0`   |
+| Tools (iperf3, ib_write_bw, fi_rma_bw, ibv_rc_pingpong) | `registry.redhat.io/rhoai/odh-rhaii-validator-tools-rhel9:v3.4.0`   |
 
 
 Set the image variables and run checks:
@@ -271,7 +271,7 @@ FAIL: `TCP bandwidth: 7.6 Gbps (well below 25 Gbps threshold)`
 
 Image: `quay.io/opendatahub/odh-rhaii-validator-tools:odh-stable` (default: `quay.io/opendatahub/odh-rhaii-validator-tools:odh-stable`)
 
-### RDMA Bandwidth (ib_write_bw)
+### RDMA Bandwidth
 
 Runs RDMA write bandwidth test per GPU-NIC pair. Uses topology to set the right device and GPU:
 
@@ -290,7 +290,13 @@ ib-write-bw-mlx5-0: -d mlx5_0 --use_cuda 0
 ib-write-bw-mlx5-1: -d mlx5_1 --use_cuda 1
 ...
 ib-write-bw-mlx5-7: -d mlx5_7 --use_cuda 7
+
 ```
+
+On EFA/SRD, each PD job runs fi_rma_bw writedata concurrently on every EFA NIC
+PCIe-aligned with one GPU. GPU groups run sequentially, followed by a WEP job
+that activates all GPU/NIC groups. Traffic is unidirectional from client to
+server, and EFA defaults to a 4 MiB transfer size.
 
 Parses `BW average [MB/sec]` from output, converts to Gbps.
 Compares against `thresholds.rdma_bandwidth_pd_gbps` from platform config.
@@ -434,7 +440,7 @@ Report:
 - GPU tools run on host via `chroot /host` (privileged per-node Jobs)
 - Bandwidth jobs use ring topology (every node tested as sender + receiver)
 - RDMA tests expanded per GPU-NIC pair using discovered topology
-- RDMA tests skipped if no RDMA resource configured
+- RDMA bandwidth-job expansion skipped when no GPU-paired RDMA NICs are found
 - Report stored in ConfigMap for persistence
 - Default images defined in `manifests/image-references/image-references.yaml` (embedded via `//go:embed`), overridable with env vars (`RELATED_IMAGE_RHAII_CLUSTER_VALIDATOR`, `RELATED_IMAGE_RHAII_VALIDATOR_TOOLS`) or CLI flags (`--image`, `--tools-image`)
 
@@ -443,7 +449,7 @@ Report:
 
 | Vendor | Driver Check | ECC Check              | Bandwidth Jobs               |
 | ------ | ------------ | ---------------------- | ---------------------------- |
-| NVIDIA | nvidia-smi   | nvidia-smi (ECC query) | iperf3, ib_write_bw          |
+| NVIDIA | nvidia-smi   | nvidia-smi (ECC query) | iperf3, ib_write_bw, fi_rma_bw |
 | AMD    | rocm-smi     | rocm-smi (RAS query)   | Skipped (NVIDIA-only images) |
 
 

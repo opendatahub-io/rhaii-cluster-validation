@@ -24,7 +24,7 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 	}
 
 	// Determine RDMA type: primary from config, fallback from topology link layer
-	rdmaType, err := rdma.ResolvePingMeshRDMAType(c.cfg.Jobs.RDMAType, topoMap)
+	rdmaType, err := rdma.ResolveRDMAType(c.cfg.Jobs.RDMAType, topoMap)
 	if err != nil {
 		return err
 	}

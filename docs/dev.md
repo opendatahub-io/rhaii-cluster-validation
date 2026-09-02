@@ -192,7 +192,7 @@ There are two kinds of validation checks:
 | Type | Scope | Runs as | Example |
 |---|---|---|---|
 | **Per-node check** | Single node | Per-node Job pod | GPU driver, ECC, RDMA devices |
-| **Multi-node job** | Between nodes | K8s Jobs (server + clients) | iperf3, ib_write_bw, NCCL |
+| **Multi-node job** | Between nodes | K8s Jobs (server + clients) | iperf3, ib_write_bw, fi_rma_bw, NCCL |
 
 ### Adding a new per-node check
 
@@ -305,7 +305,7 @@ That's it. The controller automatically:
 |---|---|---|
 | `pkg/checks` | `Check` interface, `Result`, `NodeReport` types | Define check contract |
 | `pkg/checks/gpu` | GPU driver, ECC checks | Run GPU checks directly or via agent |
-| `pkg/checks/rdma` | RDMA device, NIC status checks + ib_write_bw job | Run RDMA checks directly or via agent |
+| `pkg/checks/rdma` | RDMA device, NIC status checks + bandwidth jobs | Run RDMA checks directly or via agent |
 | `pkg/checks/networking` | TCP bandwidth check + iperf3 job | Run network checks directly or via agent |
 | `pkg/config` | Platform detection, config loading | Auto-detect platform, load thresholds |
 | `pkg/controller` | Full lifecycle: RBAC, per-node jobs, bandwidth jobs, pod log collection, report | Full `validate --extended` workflow |
