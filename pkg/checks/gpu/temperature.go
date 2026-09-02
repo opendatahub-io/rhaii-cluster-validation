@@ -118,8 +118,8 @@ func parseTemperatureOutput(output string) (map[int]int, error) {
 
 	temps := make(map[int]int)
 	for _, fields := range records {
-		if len(fields) < 2 {
-			continue
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("invalid temperature output: expected 2 fields, got %d", len(fields))
 		}
 		gpuIdx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
 		if err != nil {

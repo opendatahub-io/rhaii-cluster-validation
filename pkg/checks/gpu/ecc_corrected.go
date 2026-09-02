@@ -88,15 +88,18 @@ func parseECCCorrectedOutput(output string, warnThreshold int) (warnings []strin
 	}
 
 	for _, fields := range records {
-		if len(fields) < 2 {
-			continue
+		if len(fields) != 2 {
+			return nil, 0, fmt.Errorf("invalid ECC corrected output: expected 2 fields, got %d", len(fields))
 		}
 		gpuIdx := strings.TrimSpace(fields[0])
 		eccCorrected := strings.TrimSpace(fields[1])
 
 		if eccCorrected != "N/A" && eccCorrected != "" {
 			count, parseErr := strconv.Atoi(eccCorrected)
-			if parseErr == nil && count >= warnThreshold {
+			if parseErr != nil {
+				return nil, 0, fmt.Errorf("invalid ECC corrected count for GPU %s: %s", gpuIdx, eccCorrected)
+			}
+			if count >= warnThreshold {
 				warnings = append(warnings, fmt.Sprintf("GPU %s: %d corrected errors (>= %d)", gpuIdx, count, warnThreshold))
 			}
 		}

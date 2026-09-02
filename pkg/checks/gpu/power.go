@@ -128,8 +128,8 @@ func parsePowerOutput(output string) ([]powerStat, error) {
 
 	var stats []powerStat
 	for _, fields := range records {
-		if len(fields) < 3 {
-			continue
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("invalid power output: expected 3 fields, got %d", len(fields))
 		}
 		gpuIdx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
 		if err != nil {
