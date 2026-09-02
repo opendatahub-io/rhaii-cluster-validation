@@ -8,6 +8,7 @@ import (
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks/rdma"
+	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/config"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/jobrunner"
 
 	corev1 "k8s.io/api/core/v1"
@@ -83,9 +84,38 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 			}
 			pair := jobrunner.NodePair{Server: serverNode, Client: clientNode}
 			pmJob := rdma.NewPingMeshJob(serverNode, clientNode, serverDevs, clientDevs, rdmaType, gidIndex, iterations, timeout)
+			if err := pmJob.ValidateDevices(); err != nil {
+				fmt.Fprintf(c.output, "  Warning: %v for %s↔%s, skipping pair\n", err, serverNode, clientNode)
+				continue
+			}
 			pmJob.SetPodConfig(rdmaCfg)
 			pmJob.SetServerImage(toolsImage)
 			pmJob.SetClientImage(toolsImage)
+
+			// Inject EFA resources if using EFA RDMA type. Without requesting
+			// vpc.amazonaws.com/efa the pod has no access to EFA interfaces, so
+			// fi_rdm_pingpong would fail anyway; skip the pair instead of deploying
+			// a job that's guaranteed to fail.
+			//
+			// EFA count is read from the server node only, on the assumption that
+			// node pairs are the same EC2 instance type (and thus have identical EFA
+			// NIC counts). This holds within a single RDMA/SRD network domain — e.g.
+			// all p5 nodes — but not across domains (e.g. p5 vs p6 aren't expected to
+			// be in the same domain, so they wouldn't be paired for pingmesh anyway).
+			if rdmaType == config.RDMATypeSRD {
+				node, err := c.client.CoreV1().Nodes().Get(ctx, serverNode, metav1.GetOptions{})
+				if err != nil {
+					fmt.Fprintf(c.output, "  Warning: failed to get server node %s for EFA count: %v, skipping pair\n", serverNode, err)
+					continue
+				}
+				efaCount := config.AutoEFACount(node.Status.Allocatable, config.ResourceConfigHasEFA(c.cfg.Jobs), c.cfg.Jobs.GetEFACount())
+				if efaCount <= 0 {
+					fmt.Fprintf(c.output, "  Warning: no EFA devices available on server node %s, skipping pair %s↔%s\n", serverNode, serverNode, clientNode)
+					continue
+				}
+				pmJob.SetExtendedResource(string(config.EFAResourceName), fmt.Sprintf("%d", efaCount))
+			}
+
 			jobMap[pair] = pmJob
 		}
 	}

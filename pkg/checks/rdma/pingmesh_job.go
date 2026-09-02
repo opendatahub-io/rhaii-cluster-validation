@@ -15,12 +15,13 @@ import (
 const (
 	pingmeshPortBase      = 18515
 	defaultPingTimeout    = 10
-	defaultPingIterations = 1
+	defaultPingIterations = 3
 	defaultServerBufSec   = 30
+	srdPingMessageSize    = 64 // fi_rdm_pingpong -S: fixed connectivity probe size
 )
 
-// PingMeshJob implements jobrunner.Job for pairwise RDMA connectivity testing
-// using ibv_rc_pingpong. A single job type handles both RoCEv2 and InfiniBand.
+// PingMeshJob implements jobrunner.Job for pairwise RDMA connectivity testing.
+// IB/RoCE uses ibv_rc_pingpong; EFA (SRD) uses fi_rdm_pingpong.
 type PingMeshJob struct {
 	ServerDevices []string // RDMA devices on the server (destination) node
 	ClientDevices []string // RDMA devices on the client (source) node
@@ -43,8 +44,8 @@ func NewPingMeshJob(serverNode, clientNode string, serverDevs, clientDevs []stri
 		timeout = defaultPingTimeout
 	}
 	return &PingMeshJob{
-		ServerDevices: serverDevs,
-		ClientDevices: clientDevs,
+		ServerDevices: filterValidDeviceNames(serverDevs),
+		ClientDevices: filterValidDeviceNames(clientDevs),
 		ServerNode:    serverNode,
 		ClientNode:    clientNode,
 		RDMAType:      rdmaType,
@@ -52,6 +53,18 @@ func NewPingMeshJob(serverNode, clientNode string, serverDevs, clientDevs []stri
 		Iterations:    iterations,
 		Timeout:       timeout,
 	}
+}
+
+// ValidateDevices returns an error when no valid RDMA devices remain after
+// NewPingMeshJob filters invalid names.
+func (j *PingMeshJob) ValidateDevices() error {
+	if len(j.ServerDevices) == 0 {
+		return fmt.Errorf("pingmesh: no valid server RDMA devices")
+	}
+	if len(j.ClientDevices) == 0 {
+		return fmt.Errorf("pingmesh: no valid client RDMA devices")
+	}
+	return nil
 }
 
 func (j *PingMeshJob) Name() string { return "pingmesh" }
@@ -84,6 +97,22 @@ func (j *PingMeshJob) SetNameSuffix(suffix string) {
 	j.PodCfg.NameSuffix = suffix
 }
 
+// SetExtendedResource sets an extended resource request/limit on the pod config.
+// Currently used for EFA resource injection where both request and limit must be equal.
+func (j *PingMeshJob) SetExtendedResource(resourceName string, quantity string) {
+	if j.PodCfg == nil {
+		j.PodCfg = &jobrunner.PodConfig{}
+	}
+	if j.PodCfg.ResourceRequests == nil {
+		j.PodCfg.ResourceRequests = make(map[string]string)
+	}
+	if j.PodCfg.ResourceLimits == nil {
+		j.PodCfg.ResourceLimits = make(map[string]string)
+	}
+	j.PodCfg.ResourceRequests[resourceName] = quantity
+	j.PodCfg.ResourceLimits[resourceName] = quantity
+}
+
 func (j *PingMeshJob) GetServerImage() string    { return j.ServerImage }
 func (j *PingMeshJob) GetClientImage() string    { return j.ClientImage }
 func (j *PingMeshJob) SetServerImage(img string) { j.ServerImage = img }
@@ -99,8 +128,29 @@ func (j *PingMeshJob) validDeviceCount(devs []string) int {
 	return n
 }
 
+func filterValidDeviceNames(devs []string) []string {
+	var out []string
+	for _, d := range devs {
+		if checks.ValidDeviceName.MatchString(d) {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func bashQuotedArray(name string, devs []string) string {
+	if len(devs) == 0 {
+		return name + "=()"
+	}
+	quoted := make([]string, len(devs))
+	for i, d := range devs {
+		quoted[i] = fmt.Sprintf("%q", d)
+	}
+	return fmt.Sprintf("%s=(%s)", name, strings.Join(quoted, " "))
+}
+
 func (j *PingMeshJob) serverTimeout() int {
-	tests := j.validDeviceCount(j.ServerDevices) * j.validDeviceCount(j.ClientDevices)
+	tests := len(j.ServerDevices) * len(j.ClientDevices)
 	return tests*j.Timeout + defaultServerBufSec
 }
 
@@ -137,11 +187,11 @@ func gidDiscoveryFunc() string {
 }`
 }
 
-// gidFlagExpr returns the bash expression for the -g flag on a per-device basis.
+// ibvGIDFlagExpr returns the bash expression for ibv_rc_pingpong's -g flag.
 // For RoCE with auto-discover: uses find_rocev2_gid with validation
 // For RoCE with fixed index:   "-g N"
 // For IB:                      "" (empty, no flag)
-func (j *PingMeshJob) gidFlagExpr(devVar string) string {
+func (j *PingMeshJob) ibvGIDFlagExpr(devVar string) string {
 	if j.RDMAType != config.RDMATypeRoCE {
 		return ""
 	}
@@ -151,15 +201,29 @@ func (j *PingMeshJob) gidFlagExpr(devVar string) string {
 	return fmt.Sprintf(" -g $(find_rocev2_gid %s)", devVar)
 }
 
-func (j *PingMeshJob) needsGIDDiscovery() bool {
+func (j *PingMeshJob) ibvNeedsGIDDiscovery() bool {
 	return j.RDMAType == config.RDMATypeRoCE && j.GIDIndex < 0
 }
 
 func (j *PingMeshJob) serverScript() []string {
+	if j.RDMAType == config.RDMATypeSRD {
+		return j.srdServerScript()
+	}
+	return j.ibvServerScript()
+}
+
+func (j *PingMeshJob) clientScript(serverIP string) []string {
+	if j.RDMAType == config.RDMATypeSRD {
+		return j.srdClientScript(serverIP)
+	}
+	return j.ibvClientScript(serverIP)
+}
+
+func (j *PingMeshJob) ibvServerScript() []string {
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\nmkdir -p /tmp\nexec 2>/tmp/pm_server_err.log\n\n")
 
-	if j.needsGIDDiscovery() {
+	if j.ibvNeedsGIDDiscovery() {
 		sb.WriteString(gidDiscoveryFunc())
 		sb.WriteString("\nexport -f find_rocev2_gid\n\n")
 	}
@@ -169,10 +233,11 @@ func (j *PingMeshJob) serverScript() []string {
 		if !checks.ValidDeviceName.MatchString(sdev) {
 			continue
 		}
-		gidFlag := j.gidFlagExpr("$sdev")
+		gidFlag := j.ibvGIDFlagExpr("$sdev")
 		fmt.Fprintf(&sb, "sdev=%s\n", sdev)
 		fmt.Fprintf(&sb, "for cslot in $(seq 0 %d); do\n", len(j.ClientDevices)-1)
-		fmt.Fprintf(&sb, "  ibv_rc_pingpong -d $sdev%s -p $((18515 + idx)) -n %d > /dev/null 2>&1 &\n", gidFlag, j.Iterations)
+		fmt.Fprintf(&sb, "  ibv_rc_pingpong -d $sdev%s -p $((18515 + idx)) -n %d > /dev/null 2>&1 &\n",
+			gidFlag, j.Iterations)
 		sb.WriteString("  idx=$((idx + 1))\ndone\n")
 	}
 	sb.WriteString("wait\n' > /dev/null 2>&1 || true\n")
@@ -180,11 +245,33 @@ func (j *PingMeshJob) serverScript() []string {
 	return []string{"bash", "-c", sb.String()}
 }
 
-func (j *PingMeshJob) clientScript(serverIP string) []string {
+func (j *PingMeshJob) srdServerScript() []string {
+	var sb strings.Builder
+	sb.WriteString("#!/bin/bash\nmkdir -p /tmp\nexec 2>/tmp/pm_server_err.log\n\n")
+
+	fmt.Fprintf(&sb, "timeout %d bash -c '\nidx=0\n", j.serverTimeout())
+	for _, sdev := range j.ServerDevices {
+		if !checks.ValidDeviceName.MatchString(sdev) {
+			continue
+		}
+		fmt.Fprintf(&sb, "sdev=%s\n", sdev)
+		fmt.Fprintf(&sb, "for cslot in $(seq 0 %d); do\n", len(j.ClientDevices)-1)
+		// fi_rdm_pingpong: -p is provider, -E is OOB TCP port for address exchange.
+		// FI_EFA_IFACE selects the server NIC (fabtests -d is domain name, not device).
+		fmt.Fprintf(&sb, "  FI_EFA_IFACE=$sdev fi_rdm_pingpong -p efa -E=$((%d + idx)) -S %d -I %d > /dev/null 2>&1 &\n",
+			pingmeshPortBase, srdPingMessageSize, j.Iterations)
+		sb.WriteString("  idx=$((idx + 1))\ndone\n")
+	}
+	sb.WriteString("wait\n' > /dev/null 2>&1 || true\n")
+
+	return []string{"bash", "-c", sb.String()}
+}
+
+func (j *PingMeshJob) ibvClientScript(serverIP string) []string {
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\nmkdir -p /tmp/pm\nexec 2>/tmp/pm/script_stderr.log\n\n")
 
-	if j.needsGIDDiscovery() {
+	if j.ibvNeedsGIDDiscovery() {
 		sb.WriteString(gidDiscoveryFunc())
 		sb.WriteString("\n\n")
 	}
@@ -200,7 +287,7 @@ func (j *PingMeshJob) clientScript(serverIP string) []string {
 			if !checks.ValidDeviceName.MatchString(cdev) {
 				continue
 			}
-			if j.needsGIDDiscovery() {
+			if j.ibvNeedsGIDDiscovery() {
 				// Validate GID before running ibv_rc_pingpong; -1 means discovery failed
 				fmt.Fprintf(&sb, "_gid=$(find_rocev2_gid %s)\n", cdev)
 				sb.WriteString("if [ \"$_gid\" -eq -1 ]; then\n")
@@ -214,7 +301,7 @@ func (j *PingMeshJob) clientScript(serverIP string) []string {
 				fmt.Fprintf(&sb, "  echo '%s:%s:'$? >> /tmp/pm/results.txt\n", cdev, sdev)
 				sb.WriteString("fi\n")
 			} else {
-				gidFlag := j.gidFlagExpr(cdev)
+				gidFlag := j.ibvGIDFlagExpr(cdev)
 				fmt.Fprintf(&sb,
 					"timeout %d ibv_rc_pingpong -d %s%s -p $((18515 + idx)) -n %d %s > /tmp/pm/out_${idx}.txt 2>&1\n",
 					j.Timeout, cdev, gidFlag, j.Iterations, serverIP,
@@ -225,8 +312,52 @@ func (j *PingMeshJob) clientScript(serverIP string) []string {
 		}
 	}
 
-	// Assemble JSON from results file, wrapped with node names
-	fmt.Fprintf(&sb, `
+	j.appendClientJSON(&sb)
+	return []string{"bash", "-c", sb.String()}
+}
+
+// srdClientScript generates the EFA/SRD client script. Unlike ibvClientScript,
+// this uses bash loops over device arrays rather than unrolling every server×client
+// pair inline: a 32×32 mesh produced a ~293KB script embedded in bash -c, which
+// exceeded ARG_MAX ("argument list too long") and the pod exited before emitting JSON.
+// TODO: ibvClientScript has the same unrolled pattern and may need the loop approach
+// if large-NIC IB/RoCE clusters hit ARG_MAX.
+func (j *PingMeshJob) srdClientScript(serverIP string) []string {
+	var sb strings.Builder
+	sb.WriteString("#!/bin/bash\nmkdir -p /tmp/pm\nexec 2>/tmp/pm/script_stderr.log\n\n")
+
+	sdevs := j.ServerDevices
+	cdevs := j.ClientDevices
+	sb.WriteString(bashQuotedArray("SDEVS", sdevs))
+	sb.WriteString("\n")
+	sb.WriteString(bashQuotedArray("CDEVS", cdevs))
+	sb.WriteString("\n\n")
+
+	// Port indices must match srdServerScript (same ServerDevices × ClientDevices order).
+	sb.WriteString("idx=0\nfor sdev in \"${SDEVS[@]}\"; do\n  for cdev in \"${CDEVS[@]}\"; do\n")
+	fmt.Fprintf(&sb,
+		"    (timeout %d env FI_EFA_IFACE=$cdev fi_rdm_pingpong -p efa -E=$((%d + idx)) -S %d -I %d %s > /tmp/pm/out_${idx}.txt 2>&1; echo $? > /tmp/pm/rc_${idx}.txt) &\n",
+		j.Timeout, pingmeshPortBase, srdPingMessageSize, j.Iterations, serverIP,
+	)
+	sb.WriteString(`    idx=$((idx + 1))
+  done
+done
+wait
+idx=0
+for sdev in "${SDEVS[@]}"; do
+  for cdev in "${CDEVS[@]}"; do
+    echo "${cdev}:${sdev}:$(cat /tmp/pm/rc_${idx}.txt)" >> /tmp/pm/results.txt
+    idx=$((idx + 1))
+  done
+done
+`)
+
+	j.appendClientJSON(&sb)
+	return []string{"bash", "-c", sb.String()}
+}
+
+func (j *PingMeshJob) appendClientJSON(sb *strings.Builder) {
+	fmt.Fprintf(sb, `
 printf '{"server_node":"%s","client_node":"%s","results":['
 first=1
 idx=0
@@ -243,8 +374,6 @@ while IFS=: read -r cdev sdev rc; do
 done < /tmp/pm/results.txt
 printf ']}'
 `, j.ServerNode, j.ClientNode)
-
-	return []string{"bash", "-c", sb.String()}
 }
 
 func (j *PingMeshJob) ServerSpec(node, namespace, image string) (*batchv1.Job, error) {
@@ -288,7 +417,11 @@ func (j *PingMeshJob) ParseResult(logs string) (*jobrunner.JobResult, error) {
 	}
 
 	status := checks.StatusPass
-	if passed == 0 && len(results) > 0 {
+	msg := fmt.Sprintf("Pingmesh: %d/%d NIC pairs passed", passed, len(results))
+	if len(results) == 0 {
+		status = checks.StatusFail
+		msg = "Pingmesh: no NIC pairs probed"
+	} else if passed == 0 {
 		status = checks.StatusFail
 	} else if passed < len(results) {
 		status = checks.StatusFail
@@ -296,7 +429,7 @@ func (j *PingMeshJob) ParseResult(logs string) (*jobrunner.JobResult, error) {
 
 	return &jobrunner.JobResult{
 		Status:  status,
-		Message: fmt.Sprintf("Pingmesh: %d/%d NIC pairs passed", passed, len(results)),
+		Message: msg,
 		Details: results,
 	}, nil
 }

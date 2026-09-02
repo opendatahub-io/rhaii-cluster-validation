@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 )
 
 // sysfsNICRoot is the sysfs infiniband class path (overridable in tests).
@@ -96,9 +98,19 @@ func readPortStatus(dev, portNum, portPath string) (NICStatusInfo, bool) {
 		nic.Rate = parseSysfsRate(rateRaw)
 	}
 	if llRaw, err := readSysfsPortFile(filepath.Join(portPath, "link_layer")); err == nil {
-		nic.LinkLayer = strings.TrimSpace(llRaw)
+		nic.LinkLayer = string(resolveLinkLayer(dev, llRaw))
 	}
 	return nic, true
+}
+
+// resolveLinkLayer normalizes sysfs ports/1/link_layer for dev. EFA NICs often
+// report "Unknown"; map those to SRD so topology and pingmesh match status checks.
+func resolveLinkLayer(dev, rawSysfs string) checks.LinkLayer {
+	ll := checks.LinkLayer(strings.TrimSpace(rawSysfs))
+	if ll == checks.LinkLayerUnknown && IsEFADevice(dev) {
+		return checks.LinkLayerSRD
+	}
+	return ll
 }
 
 func readSysfsPortFile(path string) (string, error) {

@@ -576,7 +576,8 @@ func (r *Runner) getPodSchedulingError(ctx context.Context, selector string) str
 	return msg
 }
 
-// cleanup deletes all created jobs and their pods.
+// cleanup deletes all created jobs and their pods, then waits for pod
+// termination so extended resources (e.g. EFA) are released before retries.
 func (r *Runner) cleanup(ctx context.Context, jobs []*batchv1.Job) {
 	propagation := metav1.DeletePropagationBackground
 	for _, j := range jobs {
@@ -588,12 +589,22 @@ func (r *Runner) cleanup(ctx context.Context, jobs []*batchv1.Job) {
 		}
 	}
 
-	// Wait for jobs to be fully deleted before returning
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 60; i++ {
 		allGone := true
 		for _, j := range jobs {
 			_, err := r.client.BatchV1().Jobs(r.namespace).Get(ctx, j.Name, metav1.GetOptions{})
 			if err == nil {
+				allGone = false
+				break
+			}
+			if !apierrors.IsNotFound(err) {
+				allGone = false
+				break
+			}
+			pods, err := r.client.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("job-name=%s", j.Name),
+			})
+			if err != nil || len(pods.Items) > 0 {
 				allGone = false
 				break
 			}
@@ -603,4 +614,5 @@ func (r *Runner) cleanup(ctx context.Context, jobs []*batchv1.Job) {
 		}
 		time.Sleep(1 * time.Second)
 	}
+	fmt.Fprintf(r.output, "  Warning: some job pods still terminating after cleanup\n")
 }

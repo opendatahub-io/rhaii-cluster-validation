@@ -14,7 +14,7 @@ import (
 // configured type takes precedence, otherwise it's inferred from the link
 // layer of GPU-paired NICs across all node topologies.
 func ResolvePingMeshRDMAType(configuredType string, topoMap map[string]*checks.NodeTopology) (config.RDMAType, error) {
-	if rt := config.RDMAType(configuredType); rt == config.RDMATypeIB || rt == config.RDMATypeRoCE {
+	if rt := config.RDMAType(configuredType); rt == config.RDMATypeIB || rt == config.RDMATypeRoCE || rt == config.RDMATypeSRD {
 		return rt, nil
 	}
 
@@ -44,6 +44,8 @@ func ResolvePingMeshRDMAType(configuredType string, topoMap map[string]*checks.N
 		return config.RDMATypeRoCE, nil
 	case linkLayers[checks.LinkLayerInfiniBand]:
 		return config.RDMATypeIB, nil
+	case linkLayers[checks.LinkLayerSRD]:
+		return config.RDMATypeSRD, nil
 	default:
 		return "", fmt.Errorf("unknown link layer type in topology")
 	}

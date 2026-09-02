@@ -69,6 +69,19 @@ func (c *ResourceConfig) GetPingGIDIndex() int {
 	return -1
 }
 
+// GetEFACount returns the configured EFA device count from jobs requests or limits,
+// or 0 when unset or not a positive integral quantity.
+func (c *ResourceConfig) GetEFACount() int64 {
+	key := string(EFAResourceName)
+	if v, ok := c.Requests[key]; ok {
+		return parseEFACountQuantity(v)
+	}
+	if v, ok := c.Limits[key]; ok {
+		return parseEFACountQuantity(v)
+	}
+	return 0
+}
+
 // RDMAType identifies the RDMA fabric type for NIC filtering.
 type RDMAType string
 
