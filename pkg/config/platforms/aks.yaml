@@ -19,6 +19,11 @@ jobs:
 
 gpu:
   min_driver_version: "535.0"
+  temperature_warn_c: 80
+  temperature_error_c: 90
+  power_warn_percent: 90
+  power_error_percent: 98
+  ecc_corrected_warn: 1
 
 crds:
   min_api_versions:
