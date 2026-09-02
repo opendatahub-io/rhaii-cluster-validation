@@ -19,6 +19,13 @@ type TemperatureCheck struct {
 }
 
 func NewTemperatureCheck(nodeName string, warnThreshold, errorThreshold int) *TemperatureCheck {
+	// Ensure warn threshold is less than error threshold
+	if warnThreshold >= errorThreshold {
+		warnThreshold = errorThreshold - 1
+		if warnThreshold < 0 {
+			warnThreshold = 0
+		}
+	}
 	return &TemperatureCheck{
 		nodeName:       nodeName,
 		warnThreshold:  warnThreshold,
@@ -49,6 +56,12 @@ func (c *TemperatureCheck) Run(ctx context.Context) checks.Result {
 	if err != nil {
 		r.Status = checks.StatusFail
 		r.Message = err.Error()
+		return r
+	}
+
+	if len(temps) == 0 {
+		r.Status = checks.StatusSkip
+		r.Message = "No GPUs found"
 		return r
 	}
 

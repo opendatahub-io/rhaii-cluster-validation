@@ -19,6 +19,13 @@ type PowerCheck struct {
 }
 
 func NewPowerCheck(nodeName string, warnPercentage, errorPercentage int) *PowerCheck {
+	// Ensure warn threshold is less than error threshold
+	if warnPercentage >= errorPercentage {
+		warnPercentage = errorPercentage - 1
+		if warnPercentage < 0 {
+			warnPercentage = 0
+		}
+	}
 	return &PowerCheck{
 		nodeName:        nodeName,
 		warnPercentage:  warnPercentage,
@@ -52,6 +59,12 @@ func (c *PowerCheck) Run(ctx context.Context) checks.Result {
 		return r
 	}
 
+	if len(powerStats) == 0 {
+		r.Status = checks.StatusSkip
+		r.Message = "No GPUs found"
+		return r
+	}
+
 	var warnings []string
 	var errors []string
 	maxPercentage := 0.0
@@ -60,10 +73,10 @@ func (c *PowerCheck) Run(ctx context.Context) checks.Result {
 		if ps.Percentage > maxPercentage {
 			maxPercentage = ps.Percentage
 		}
-		if int(ps.Percentage) >= c.errorPercentage {
+		if ps.Percentage >= float64(c.errorPercentage) {
 			errors = append(errors, fmt.Sprintf("GPU %d: %.1fW/%.1fW (%.0f%% >= %d%%)",
 				ps.Index, ps.Draw, ps.Limit, ps.Percentage, c.errorPercentage))
-		} else if int(ps.Percentage) >= c.warnPercentage {
+		} else if ps.Percentage >= float64(c.warnPercentage) {
 			warnings = append(warnings, fmt.Sprintf("GPU %d: %.1fW/%.1fW (%.0f%% >= %d%%)",
 				ps.Index, ps.Draw, ps.Limit, ps.Percentage, c.warnPercentage))
 		}

@@ -52,6 +52,12 @@ func (c *ECCCorrectedCheck) Run(ctx context.Context) checks.Result {
 		return r
 	}
 
+	if gpuCount == 0 {
+		r.Status = checks.StatusSkip
+		r.Message = "No GPUs found"
+		return r
+	}
+
 	if len(warnings) > 0 {
 		r.Status = checks.StatusWarn
 		r.Message = fmt.Sprintf("Corrected ECC errors detected: %s", strings.Join(warnings, "; "))
