@@ -143,6 +143,11 @@ const (
 // (node selector, device plugin, taint) are auto-detected from node labels at runtime.
 type GPUConfig struct {
 	MinDriverVersion string `yaml:"min_driver_version" json:"min_driver_version"`
+	TemperatureWarn  int    `yaml:"temperature_warn_c,omitempty" json:"temperature_warn_c,omitempty"`
+	TemperatureError int    `yaml:"temperature_error_c,omitempty" json:"temperature_error_c,omitempty"`
+	PowerWarnPercent int    `yaml:"power_warn_percent,omitempty" json:"power_warn_percent,omitempty"`
+	PowerErrorPercent int   `yaml:"power_error_percent,omitempty" json:"power_error_percent,omitempty"`
+	ECCCorrectedWarn int    `yaml:"ecc_corrected_warn,omitempty" json:"ecc_corrected_warn,omitempty"`
 }
 
 // ThresholdConfig holds network performance thresholds.

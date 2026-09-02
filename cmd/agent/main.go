@@ -387,6 +387,16 @@ func newRunCmd() *cobra.Command {
 				default:
 					r.AddCheck(gpu.NewDriverCheck(nodeName, cfg.GPU.MinDriverVersion))
 					r.AddCheck(gpu.NewECCCheck(nodeName))
+					// Phase 1 core hardware metrics
+					if cfg.GPU.TemperatureWarn > 0 && cfg.GPU.TemperatureError > 0 {
+						r.AddCheck(gpu.NewTemperatureCheck(nodeName, cfg.GPU.TemperatureWarn, cfg.GPU.TemperatureError))
+					}
+					if cfg.GPU.PowerWarnPercent > 0 && cfg.GPU.PowerErrorPercent > 0 {
+						r.AddCheck(gpu.NewPowerCheck(nodeName, cfg.GPU.PowerWarnPercent, cfg.GPU.PowerErrorPercent))
+					}
+					if cfg.GPU.ECCCorrectedWarn > 0 {
+						r.AddCheck(gpu.NewECCCorrectedCheck(nodeName, cfg.GPU.ECCCorrectedWarn))
+					}
 				}
 			}
 
