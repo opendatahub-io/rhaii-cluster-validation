@@ -56,3 +56,9 @@ thresholds:
   rdma_bandwidth_wep_gbps:
     pass: 350
     warn: 200
+  # Intra-node NVLink NCCL all-reduce peak bus bandwidth, in GB/s (gigabytes/sec,
+  # nccl-tests "busbw" — not gigabits). Separates real NVLink (hundreds of GB/s)
+  # from a PCIe fallback / degraded fabric (tens of GB/s).
+  nccl_nvlink_busbw_gbytes:
+    pass: 300
+    warn: 150

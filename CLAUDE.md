@@ -120,5 +120,13 @@ Common flags: `--debug` (keep pods alive for `kubectl exec`/logs), `-o json`, `-
 
 - AMD GPUs: bandwidth jobs skipped (tools image is NVIDIA-only)
 - `ibv_devices`/`ibstat` not on AKS hosts — sysfs fallback used
-- NCCL all-reduce job: framework ready, needs NCCL image
+- NCCL all-reduce job (multi-node, cross-node): framework ready, needs NCCL image
+- Single-node NVLink NCCL all-reduce check (`gpu_nvlink_nccl`, per-node, part of
+  the `gpu`/`all` modes for NVIDIA) — **GB200 NVL4 only**: implemented in
+  `pkg/checks/gpu/nvlink.go`. Runs `all_reduce_perf` across all local GPUs and
+  checks correctness + peak busbw (threshold `thresholds.nccl_nvlink_busbw_gbytes`,
+  in GB/s). Scoped to GB200 NVL4 by detecting the GPU model via `nvidia-smi -L`;
+  SKIPs on any non-GB200 hardware. Also SKIPs when `all_reduce_perf` is not on
+  PATH — the validator image does not yet ship nccl-tests, so the check activates
+  automatically once an NCCL-capable image provides the binary.
 - `deps` subcommand: partially implemented (CRDs + operators)
