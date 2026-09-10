@@ -7,7 +7,7 @@ Runs preflight checks on GPU clusters before deploying inference workloads. Vali
 **What it checks:**
 
 - GPU driver version and ECC memory errors
-- Intra-node NVLink health (NCCL all-reduce across local GPUs)
+- Single-node NVLink health on **GB200 NVL4 only** (NCCL all-reduce across local GPUs; SKIPs on other hardware)
 - GPU-NIC NUMA topology (which GPU is closest to which NIC)
 - RDMA device presence and NIC link status
 - TCP bandwidth (iperf3) and latency between node pairs
@@ -184,11 +184,17 @@ PASS: `No uncorrectable ECC errors on 2 GPU(s)`
 FAIL: `Uncorrectable ECC errors found: GPU 1: 3 uncorrectable errors`
 Remediation: Replace GPU or contact cloud provider
 
-### GPU NVLink (NCCL all-reduce)
+### GPU NVLink (NCCL all-reduce) — GB200 NVL4 only
 
-Verifies the intra-node GPU interconnect (NVLink) by running an NCCL all-reduce
-across all local GPUs and checking both correctness and achieved bus bandwidth —
-the same `all_reduce_perf` benchmark used to validate NVLink on GB200 NVL4:
+> **Scope:** This is a **single-node (intra-node) test for GB200 NVL4 systems
+> only.** It detects the GPU model via `nvidia-smi -L` and SKIPs on any
+> non-GB200 hardware — the thresholds and expected bus-bandwidth ceiling are
+> specific to GB200 NVL4.
+
+Verifies the single-node GPU interconnect (NVLink) on a GB200 NVL4 node by
+running an NCCL all-reduce across all local GPUs and checking both correctness
+and achieved bus bandwidth — the same `all_reduce_perf` benchmark used to
+validate NVLink on GB200 NVL4:
 
 ```
 all_reduce_perf -b 8 -e 1G -f 2 -g <num_gpus>
@@ -211,7 +217,8 @@ Remediation: Check `nvidia-smi topo -m` (expect NV# links, not PHB/SYS), NVLink 
 
 > **Note:** requires `all_reduce_perf` (nccl-tests) on PATH. The validator image
 > does not yet ship it, so this check reports SKIP until run from an
-> NCCL-capable image; it then activates automatically.
+> NCCL-capable image; it then activates automatically. It also SKIPs on any
+> node that is not a GB200 NVL4 system.
 
 ### GPU-NIC Topology
 

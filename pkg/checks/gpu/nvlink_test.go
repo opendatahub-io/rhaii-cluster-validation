@@ -94,6 +94,49 @@ func TestParseAllReduceOutput_PicksMaxAcrossColumns(t *testing.T) {
 	}
 }
 
+func TestParseGPUList(t *testing.T) {
+	const out = `GPU 0: NVIDIA GB200 (UUID: GPU-aaaa)
+GPU 1: NVIDIA GB200 (UUID: GPU-bbbb)
+GPU 2: NVIDIA GB200 (UUID: GPU-cccc)
+GPU 3: NVIDIA GB200 (UUID: GPU-dddd)`
+	names := parseGPUList(out)
+	if len(names) != 4 {
+		t.Fatalf("parsed %d GPUs, want 4", len(names))
+	}
+	for i, n := range names {
+		if n != "NVIDIA GB200" {
+			t.Errorf("GPU %d name = %q, want %q", i, n, "NVIDIA GB200")
+		}
+	}
+}
+
+func TestParseGPUList_Empty(t *testing.T) {
+	if names := parseGPUList(""); len(names) != 0 {
+		t.Errorf("parseGPUList(\"\") = %v, want empty", names)
+	}
+}
+
+func TestIsGB200System(t *testing.T) {
+	tests := []struct {
+		name  string
+		names []string
+		want  bool
+	}{
+		{"gb200 node", []string{"NVIDIA GB200", "NVIDIA GB200"}, true},
+		{"h100 node", []string{"NVIDIA H100 80GB HBM3", "NVIDIA H100 80GB HBM3"}, false},
+		{"a100 node", []string{"NVIDIA A100-SXM4-80GB"}, false},
+		{"no gpus", nil, false},
+		{"mixed with gb200", []string{"NVIDIA H100", "NVIDIA GB200"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGB200System(tt.names); got != tt.want {
+				t.Errorf("isGB200System(%v) = %v, want %v", tt.names, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLastLines(t *testing.T) {
 	const in = "a\nb\nc\nd\ne\n"
 	if got := lastLines(in, 2); got != "d\ne" {

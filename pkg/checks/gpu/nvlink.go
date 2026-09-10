@@ -20,12 +20,18 @@ const allReducePerfBinary = "all_reduce_perf"
 // keeping the preflight to a few seconds.
 const nvlinkMaxBytes = "1G"
 
-// NVLinkCheck verifies intra-node GPU interconnect (NVLink) health by running an
-// NCCL all-reduce across all local GPUs and inspecting both correctness and the
-// achieved bus bandwidth. On NVLink-connected multi-GPU nodes (e.g. GB200 NVL4)
-// a healthy result is data-correct with bus bandwidth in the hundreds of GB/s; a
-// PCIe fallback or degraded fabric shows tens of GB/s, and a broken interconnect
-// shows nonzero "wrong" counts.
+// gpuModelGB200 is the nvidia-smi GPU-name substring that identifies a GB200.
+// This is a single-node (intra-node) NVLink test scoped to GB200 NVL4 systems
+// only: the thresholds and expected bus-bandwidth ceiling are specific to that
+// hardware, so the check SKIPs on any other GPU model.
+const gpuModelGB200 = "GB200"
+
+// NVLinkCheck is a single-node (intra-node) NVLink health check for GB200 NVL4
+// systems only. It runs an NCCL all-reduce across all local GPUs and inspects
+// both correctness and achieved bus bandwidth. On a healthy GB200 NVL4 node the
+// result is data-correct with bus bandwidth in the hundreds of GB/s; a PCIe
+// fallback or degraded fabric shows tens of GB/s, and a broken interconnect
+// shows nonzero "wrong" counts. The check SKIPs on non-GB200 hardware.
 type NVLinkCheck struct {
 	nodeName string
 	passGBps float64 // busbw >= passGBps => PASS (GB/s, gigabytes/sec, as reported by nccl-tests)
@@ -53,13 +59,25 @@ func (c *NVLinkCheck) Run(ctx context.Context) checks.Result {
 		Name:     c.Name(),
 	}
 
-	// NVLink is a multi-GPU interconnect: nothing to test with fewer than 2 GPUs.
-	gpuCount, err := countGPUs(ctx)
+	// Enumerate GPUs: needed both to scope this check to GB200 NVL4 and to size
+	// the all-reduce (-g <gpuCount>).
+	gpus, err := listGPUs(ctx)
 	if err != nil {
 		r.Status = checks.StatusSkip
 		r.Message = fmt.Sprintf("could not enumerate GPUs, skipping NVLink test: %v", err)
 		return r
 	}
+	gpuCount := len(gpus)
+
+	// This is a GB200 NVL4-only test: SKIP cleanly on any other hardware rather
+	// than apply GB200-tuned thresholds to GPUs they don't fit.
+	if !isGB200System(gpus) {
+		r.Status = checks.StatusSkip
+		r.Message = "NVLink NCCL check runs only on GB200 NVL4 systems; no GB200 GPU detected"
+		return r
+	}
+
+	// NVLink is a multi-GPU interconnect: nothing to test with fewer than 2 GPUs.
 	if gpuCount < 2 {
 		r.Status = checks.StatusSkip
 		r.Message = fmt.Sprintf("NVLink test needs >= 2 GPUs, found %d", gpuCount)
@@ -141,19 +159,46 @@ func (c *NVLinkCheck) Run(ctx context.Context) checks.Result {
 	return r
 }
 
-// countGPUs returns the number of NVIDIA GPUs visible via nvidia-smi -L.
-func countGPUs(ctx context.Context) (int, error) {
+// listGPUs returns the model name of each NVIDIA GPU visible via nvidia-smi -L.
+func listGPUs(ctx context.Context) ([]string, error) {
 	output, err := exec.CommandContext(ctx, "nvidia-smi", "-L").Output()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "GPU ") {
-			count++
+	return parseGPUList(string(output)), nil
+}
+
+// parseGPUList extracts GPU model names from nvidia-smi -L output. Each line
+// looks like "GPU 0: NVIDIA GB200 (UUID: GPU-...)"; the model is the text
+// between the "N: " prefix and the " (UUID" suffix.
+func parseGPUList(output string) []string {
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "GPU ") {
+			continue
+		}
+		name := line
+		if i := strings.Index(name, ": "); i >= 0 {
+			name = name[i+2:]
+		}
+		if i := strings.Index(name, " (UUID"); i >= 0 {
+			name = name[:i]
+		}
+		names = append(names, strings.TrimSpace(name))
+	}
+	return names
+}
+
+// isGB200System reports whether any enumerated GPU is a GB200 — the gate that
+// scopes this check to GB200 NVL4 systems only.
+func isGB200System(names []string) bool {
+	for _, n := range names {
+		if strings.Contains(n, gpuModelGB200) {
+			return true
 		}
 	}
-	return count, nil
+	return false
 }
 
 // allReduceResult holds the health-relevant fields parsed from all_reduce_perf.
