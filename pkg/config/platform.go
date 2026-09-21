@@ -59,6 +59,8 @@ type ResourceConfig struct {
 	PingIterations int               `yaml:"ping_iterations,omitempty" json:"ping_iterations,omitempty"`
 	PingTimeout    int               `yaml:"ping_timeout,omitempty" json:"ping_timeout,omitempty"`
 	PingGIDIndex   *int              `yaml:"ping_gid_index,omitempty" json:"ping_gid_index,omitempty"` // nil = auto-discover from sysfs; 0+ = fixed index
+	// Empty = look up NADs in the run namespace only.
+	SRIOVRDMANADNamespace string `yaml:"sriov_rdma_nad_namespace,omitempty" json:"sriov_rdma_nad_namespace,omitempty"`
 }
 
 // GetPingGIDIndex returns the configured GID index, or -1 for auto-discover.

@@ -62,6 +62,7 @@ thresholds:
 | GPU resource for jobs | `nvidia.com/gpu` or `amd.com/gpu` (added to requests+limits) |
 | GPU-NIC topology | sysfs NUMA affinity |
 | OpenShift SCC | Auto-created when OCP detected |
+| SR-IOV RDMA rails | `openshift.io/*rdma` in `node.status.allocatable`, matched to a NetworkAttachmentDefinition (see below) |
 
 ## What You Configure
 
@@ -72,8 +73,50 @@ thresholds:
 | Min driver version | `gpu.min_driver_version` | If your cluster needs a different minimum |
 | Bandwidth thresholds | `thresholds.*` | If defaults don't match your hardware |
 | Pod annotations | `agent.annotations`, `jobs.annotations` | If pods need special annotations |
+| SR-IOV NAD namespace | `jobs.sriov_rdma_nad_namespace` | Only if the NADs live outside the run namespace |
 
-## Platform-Specific Examples
+## SR-IOV RDMA (VF per pod)
+
+SR-IOV RDMA differs from every other RDMA resource here. Shared device plugins
+(`rdma/ib`, `rdma/shared_ib`, `nvidia.com/roce`) mount the host's RDMA character
+devices into the pod, so those devices keep their GIDs. An SR-IOV VF is moved
+into the pod's own network namespace instead, and its GID table stays empty
+until a Multus attachment gives it a netdev and an address. Requesting the
+resource without the attachment produces a device the RDMA checks correctly
+report as not RDMA-capable.
+
+Both halves are detected and injected together for `rdma-node` checks:
+
+```text
+openshift.io/p4rdma        (node allocatable)
+        +
+roce-p4                    (NAD annotated k8s.v1.cni.cncf.io/resourceName: openshift.io/p4rdma)
+```
+
+Rules:
+
+- Only rails advertised by **every** selected node are used. Nodes need not be
+  homogeneous; a rail present on some nodes would leave Jobs Pending on the rest.
+- NADs are looked up in the run namespace. Multus namespace isolation makes
+  cross-namespace attachment cluster-specific, so it is never inferred — opt in
+  explicitly:
+
+  ```yaml
+  jobs:
+    sriov_rdma_nad_namespace: openshift-sriov-network-operator
+  ```
+
+- If two NADs claim the same resource, neither is chosen; configure
+  `jobs.requests` and `jobs.annotations` yourself to disambiguate.
+- Setting an SR-IOV resource or the `k8s.v1.cni.cncf.io/networks` annotation in
+  `jobs` disables auto-detection entirely.
+
+Find the rails a node advertises:
+
+```bash
+kubectl get nodes -o json | jq '.items[] | {name: .metadata.name,
+  rails: (.status.allocatable | to_entries | map(select(.key | startswith("openshift.io/")) | select(.key | endswith("rdma"))) | from_entries)}'
+```
 
 ### OpenShift (OCP) with NVIDIA Network Operator (RoCE)
 
