@@ -12,6 +12,50 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
+func TestDetectAndCreateConfig_ExistingConfigMapMissingNewerField(t *testing.T) {
+	oldConfigYAML := `
+platform: OCP
+jobs:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+thresholds:
+  tcp_bandwidth_gbps:
+    pass: 25
+    warn: 10
+  rdma_bandwidth_pd_gbps:
+    pass: 180
+    warn: 100
+  rdma_bandwidth_wep_gbps:
+    pass: 350
+    warn: 200
+`
+	client := fake.NewSimpleClientset( //nolint:staticcheck
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"node.openshift.io/os_id": "rhcos"}}},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: configMapName, Namespace: "rhaii-validation"},
+			Data:       map[string]string{"platform.yaml": oldConfigYAML},
+		},
+	)
+	c, _ := newTestController(client)
+	c.opts.Namespace = "rhaii-validation"
+
+	if err := c.detectAndCreateConfig(context.Background()); err != nil {
+		t.Fatalf("detectAndCreateConfig() error = %v, want nil", err)
+	}
+
+	wantDefault, err := config.GetConfig(config.PlatformOCP)
+	if err != nil {
+		t.Fatalf("GetConfig() error = %v", err)
+	}
+	if c.cfg.Thresholds.TCPLatency != wantDefault.Thresholds.TCPLatency {
+		t.Errorf("Thresholds.TCPLatency = %+v, want current default %+v", c.cfg.Thresholds.TCPLatency, wantDefault.Thresholds.TCPLatency)
+	}
+	if c.cfg.Thresholds.TCPBandwidth.Pass != 25 || c.cfg.Thresholds.TCPBandwidth.Warn != 10 {
+		t.Errorf("Thresholds.TCPBandwidth = %+v, want ConfigMap value {Pass:25 Warn:10}", c.cfg.Thresholds.TCPBandwidth)
+	}
+}
+
 func TestFilterNodes(t *testing.T) {
 	tests := []struct {
 		name       string
