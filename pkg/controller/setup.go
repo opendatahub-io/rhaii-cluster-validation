@@ -44,14 +44,16 @@ func (c *Controller) detectAndCreateConfig(ctx context.Context) error {
 	// Check if ConfigMap already exists (user may have pre-created or customized it)
 	existing, err := c.client.CoreV1().ConfigMaps(c.opts.Namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err == nil {
-		// ConfigMap exists — use it as the sole source of truth (not merged with defaults,
-		// because yaml.v3 Unmarshal merges maps instead of replacing them)
 		existingYAML, ok := existing.Data["platform.yaml"]
 		if !ok {
 			return fmt.Errorf("existing ConfigMap %s/%s is missing platform.yaml key — delete it and re-run, or add the key manually",
 				c.opts.Namespace, configMapName)
 		}
-		var cmCfg config.PlatformConfig
+		// Overlay ConfigMap YAML onto current platform defaults (same as Load()).
+		cmCfg, defaultsErr := config.GetConfig(c.platform)
+		if defaultsErr != nil {
+			return fmt.Errorf("failed to load platform defaults for %s: %w", c.platform, defaultsErr)
+		}
 		if yamlErr := yaml.Unmarshal([]byte(existingYAML), &cmCfg); yamlErr != nil {
 			return fmt.Errorf("failed to parse existing ConfigMap %s/%s platform.yaml: %w",
 				c.opts.Namespace, configMapName, yamlErr)
