@@ -85,14 +85,32 @@ resource without the attachment produces a device the RDMA checks correctly
 report as not RDMA-capable.
 
 When the SR-IOV Network Operator is installed, both halves are detected from its
-own objects and injected together for `rdma-node` checks:
+own objects and injected together for `rdma-node`, `rdma-ping`, and
+`rdma-bandwidth`:
 
 ```text
 SriovNetworkNodePolicy  isRdma: true, resourceName: p4rdma      which pools are RDMA
 SriovNetwork            resourceName: p4rdma → NAD roce-p4        which NAD serves the pool
 NAD annotation          k8s.v1.cni.cncf.io/resourceName: openshift.io/p4rdma   exact pod resource
 node allocatable        openshift.io/p4rdma > 0                  the pool really has VFs
+SriovNetworkNodeState   PF 0000:19:00.0 → p6rdma, VF → PF         which rail a GPU's NIC is on
 ```
+
+Every pod gets its own VF, so a device name seen by `rdma-node` (for example
+`mlx5_18`) does not exist in a later pod. Ping and bandwidth pods request one VF
+per rail and read their own device from the device plugin's
+`PCIDEVICE_<RESOURCE>_INFO` environment variable at startup:
+
+- `rdma-ping` requests every rail and probes each rail pair; rail vs cross-rail
+  is decided by resource name.
+- `rdma-bandwidth` maps each GPU-NIC pair to its rail through
+  `SriovNetworkNodeState`. A PD pod requests one VF on that rail; the WEP pod
+  requests one VF per rail.
+- If a pool spans more than one PF on a node, a VF may come from either PF, so
+  it cannot be tied to one GPU. Bandwidth auto-configuration is then skipped
+  with a message; configure the rails manually.
+- The loopback bandwidth probe (flat PCIe topology only) is skipped, and those
+  nodes keep NUMA-affinity pairing reported as WARN.
 
 Rules:
 
@@ -120,7 +138,7 @@ Every skipped pool is printed with the reason, for example
 See what the validator will read:
 
 ```bash
-kubectl get sriovnetworknodepolicies,sriovnetworks,sriovibnetworks -A
+kubectl get sriovnetworknodepolicies,sriovnetworks,sriovibnetworks,sriovnetworknodestates -A
 ```
 
 Configure rails manually (example):

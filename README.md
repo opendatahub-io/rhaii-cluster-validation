@@ -379,7 +379,7 @@ Report:
 | Requirement                              | Why                                                              |
 | ---------------------------------------- | ---------------------------------------------------------------- |
 | RDMA device plugin running               | Exposes RDMA resources to pods                                   |
-| RDMA resource in `jobs.resources` config | e.g., `nvidia.com/roce: "1"` or `rdma/rdma_shared_device_a: "1"` |
+| RDMA resource in `jobs.requests` config  | e.g., `nvidia.com/roce: "1"` or `rdma/rdma_shared_device_a: "1"`. Not needed for SR-IOV RDMA when the SR-IOV Network Operator is installed ([details](docs/platform-config.md#sr-iov-rdma-vf-per-pod)) |
 | InfiniBand/RoCE NICs on nodes            | `mlx5_*` devices in `/sys/class/infiniband/`                     |
 
 
@@ -395,8 +395,8 @@ Report:
 
 - Privileged SCC auto-granted to `rhaii-validator` service account
 - GPU operator must be installed (`nvidia-gpu-operator` namespace)
-- For RDMA: Network Operator with RDMA shared device plugin
-- Add RDMA resource to config: `oc edit cm rhaii-validate-config -n rhaii-validation`
+- For RDMA with SR-IOV: rails and their networks are auto-detected from the SR-IOV Network Operator; no config needed
+- For RDMA with the shared device plugin (Network Operator): add the RDMA resource to config: `oc edit cm rhaii-validate-config -n rhaii-validation`
 
 **CoreWeave:**
 
@@ -430,7 +430,7 @@ Report:
 | -------------------- | ----------------------------------- | ----------------------------- |
 | Min driver version   | `gpu.min_driver_version`            | `"535.0"`                     |
 | Pod resources        | `agent.resources`, `jobs.resources` | `cpu: "500m"`                 |
-| RDMA resource        | `jobs.resources`                    | `nvidia.com/roce: "1"`        |
+| RDMA resource        | `jobs.requests` (SR-IOV: auto)      | `nvidia.com/roce: "1"`        |
 | Bandwidth thresholds | `thresholds.`*                      | `pass: 25, warn: 10, fail: 5` |
 
 
