@@ -85,6 +85,7 @@ type Controller struct {
 	efaCounts            map[string]int64    // EFA count per node on EKS (from allocatable)
 	gpuNodeInfo          map[string]nodeInfo // labels + allocatable per GPU node (SR-IOV discovery)
 	sriovRDMAPlans       []sriovRDMAPlan     // resolved resource + Multus attachment for RDMA node checks
+	sriovResolved        bool                // resolveSRIOVRDMA ran this session
 	gpuResource          corev1.ResourceName // e.g. "nvidia.com/gpu" or "amd.com/gpu"
 	jobs                 []jobrunner.Job
 	clusterResults       []checks.Result      // Tier 1 (API) check results (CRDs, etc.)

@@ -16,10 +16,12 @@ const (
 
 // PingMeshPairResult is the per-NIC-pair result emitted by client pods.
 type PingMeshPairResult struct {
-	SrcDev string `json:"src_dev"`
-	DstDev string `json:"dst_dev"`
-	Pass   bool   `json:"pass"`
-	Error  string `json:"error,omitempty"`
+	SrcDev  string `json:"src_dev"`
+	DstDev  string `json:"dst_dev"`
+	SrcRail string `json:"src_rail,omitempty"` // SR-IOV resource, set when devices are resolved per pod
+	DstRail string `json:"dst_rail,omitempty"`
+	Pass    bool   `json:"pass"`
+	Error   string `json:"error,omitempty"`
 }
 
 // PingMeshReport holds summary + matrix for the main JSON report.
@@ -64,6 +66,8 @@ type PingMeshFailure struct {
 	NodeB    string           `json:"node_b"`
 	SrcDev   string           `json:"src_dev"`
 	DstDev   string           `json:"dst_dev"`
+	SrcRail  string           `json:"src_rail,omitempty"`
+	DstRail  string           `json:"dst_rail,omitempty"`
 	Category PingMeshCategory `json:"category"`
 	Error    string           `json:"error"`
 	Attempt  int              `json:"attempt"`

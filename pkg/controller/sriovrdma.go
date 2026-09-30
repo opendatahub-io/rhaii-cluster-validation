@@ -79,6 +79,7 @@ type sriovNetworkRef struct {
 // node allocatable, and Multus isolation; unproven rails are skipped with a reason.
 func (c *Controller) resolveSRIOVRDMA(ctx context.Context) {
 	c.sriovRDMAPlans = nil
+	c.sriovResolved = true
 	if c.dynamic == nil || config.ResourceConfigOwnsRDMAAttachment(c.cfg.Jobs) {
 		return
 	}
@@ -393,12 +394,18 @@ func (c *Controller) applySRIOVRDMA(container *corev1.Container, podAnnotations 
 		return nil
 	}
 	resources := make([]string, 0, len(c.sriovRDMAPlans))
-	networks := make([]string, 0, len(c.sriovRDMAPlans))
 	for _, p := range c.sriovRDMAPlans {
 		setContainerResource(container, corev1.ResourceName(p.resource), 1)
 		resources = append(resources, p.resource)
+	}
+	podAnnotations[config.MultusNetworksAnnotation] = c.sriovNetworks()
+	return resources
+}
+
+func (c *Controller) sriovNetworks() string {
+	networks := make([]string, 0, len(c.sriovRDMAPlans))
+	for _, p := range c.sriovRDMAPlans {
 		networks = append(networks, p.network)
 	}
-	podAnnotations[config.MultusNetworksAnnotation] = strings.Join(networks, ",")
-	return resources
+	return strings.Join(networks, ",")
 }
