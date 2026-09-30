@@ -70,6 +70,7 @@ var gvrByKind = map[string]schema.GroupVersionResource{
 	"SriovNetworkNodePolicy":      sriovPolicyGVR,
 	"SriovNetwork":                sriovNetworkGVR,
 	"SriovIBNetwork":              sriovIBNetworkGVR,
+	"SriovNetworkNodeState":       sriovNodeStateGVR,
 }
 
 // newFakeDynamic seeds objects through their real GVRs; the fake's default
@@ -82,6 +83,7 @@ func newFakeDynamic(t *testing.T, objs ...*unstructured.Unstructured) *dynamicfa
 			sriovPolicyGVR:    "SriovNetworkNodePolicyList",
 			sriovNetworkGVR:   "SriovNetworkList",
 			sriovIBNetworkGVR: "SriovIBNetworkList",
+			sriovNodeStateGVR: "SriovNetworkNodeStateList",
 		})
 	for _, obj := range objs {
 		gvr := gvrByKind[obj.GetKind()]

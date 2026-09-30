@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -65,8 +67,9 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 
 	// Find the first topology (all nodes should have same GPU count)
 	var topo *checks.NodeTopology
-	for _, t := range topoMap {
-		topo = t
+	var topoNode string
+	for n, t := range topoMap {
+		topo, topoNode = t, n
 		break
 	}
 
@@ -134,18 +137,33 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 			origPodCfg.ResourceRequests[string(c.gpuResource)] = gpuCountStr
 			origPodCfg.ResourceLimits[string(c.gpuResource)] = gpuCountStr
 		}
+		// SR-IOV: map each NIC to its rail so pods get their own VF on it.
+		if !c.sriovResolved {
+			c.resolveSRIOVRDMA(ctx)
+		}
+		layouts := c.sriovNodeLayouts(ctx)
+		if multi := multiPFRails(layouts); len(multi) > 0 {
+			for _, rail := range slices.Sorted(maps.Keys(multi)) {
+				fmt.Fprintf(c.output, "  SR-IOV RDMA: %s; skipping bandwidth auto-config. Set jobs.requests and jobs.annotations manually\n", multi[rail])
+			}
+			layouts = nil
+		}
+		// Pairs loaded from a stored report carry only the device name; NICList keeps the PCI address.
+		refLayout := layouts[topoNode]
+		nicPCI := make(map[string]string, len(topo.NICList))
+		for _, n := range topo.NICList {
+			nicPCI[n.Dev] = n.PCIAddr
+		}
 
-		// Collect unique RDMA devices for the WEP (whole-endpoint) job.
-		// Multiple GPUs may share the same NIC (e.g. GPU0↔mlx5_0, GPU1↔mlx5_0),
-		// so we deduplicate to avoid running ib_write_bw on the same NIC twice.
+		// Collect unique RDMA devices and their rails for the WEP job.
 		var rdmaDevices []string
+		var wepRails []string
 		var gpuIDs []int
 		uniqueDevices := make(map[string]bool)
 
 		cfgQPs := c.cfg.Jobs.RDMA.QPs
 		cfgMsgSize := c.cfg.Jobs.RDMA.MessageSize
 
-		// Create one PD job per GPU-NIC pair from topology
 		for _, pair := range topo.Pairs {
 			rdmaJob := rdma.NewRDMABandwidthJob(c.cfg.Thresholds.RDMABandwidthPD.Pass, c.cfg.Thresholds.RDMABandwidthPD.Warn, nil)
 			rdmaJob.PodCfg = origPodCfg.Clone()
@@ -159,19 +177,30 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 			if cfgMsgSize > 0 {
 				rdmaJob.MessageSize = cfgMsgSize
 			}
+
+			if rail := refLayout.railForVF(nicPCI[pair.NIC.Dev]); rail != "" {
+				rdmaJob.Rail = rail
+				c.attachSRIOVRails(rdmaJob.PodCfg, []string{rail})
+			}
 			jobs = append(jobs, rdmaJob)
-			fmt.Fprintf(c.output, "  RDMA PD job: GPU%d ↔ %s (NUMA:%d↔%d)\n", pair.GPU.ID, pair.NIC.Dev, pair.GPU.NUMA, pair.NIC.NUMA)
+			target := pair.NIC.Dev
+			if rdmaJob.Rail != "" {
+				target = rdmaJob.Rail
+			}
+			fmt.Fprintf(c.output, "  RDMA PD job: GPU%d ↔ %s (NUMA:%d↔%d)\n", pair.GPU.ID, target, pair.GPU.NUMA, pair.NIC.NUMA)
 
 			if !uniqueDevices[pair.NIC.Dev] {
 				rdmaDevices = append(rdmaDevices, pair.NIC.Dev)
+				wepRails = append(wepRails, rdmaJob.Rail)
 				gpuIDs = append(gpuIDs, pair.GPU.ID)
 				uniqueDevices[pair.NIC.Dev] = true
 			}
 		}
 
-		// Add WEP job if multiple NICs available
+		// Add WEP job if multiple NICs available.
 		if len(rdmaDevices) > 1 {
 			wepJob := rdma.NewRDMAWEPJob(c.cfg.Thresholds.RDMABandwidthWEP.Pass, c.cfg.Thresholds.RDMABandwidthWEP.Warn, rdmaDevices, gpuIDs)
+			wepJob.Rails = wepRails
 			wepJob.PodCfg = origPodCfg.Clone()
 			wepJob.ServerImage = origServerImg
 			wepJob.ClientImage = origClientImg
@@ -181,14 +210,40 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 			if cfgMsgSize > 0 {
 				wepJob.MessageSize = cfgMsgSize
 			}
+			c.attachSRIOVRails(wepJob.PodCfg, wepRails)
 			jobs = append(jobs, wepJob)
 			fmt.Fprintf(c.output, "  RDMA WEP job: %d NICs in parallel (%s)\n", len(rdmaDevices), strings.Join(rdmaDevices, ", "))
 		} else {
 			fmt.Fprintf(c.output, "  RDMA WEP skipped: only %d NIC(s), need 2+ for whole-endpoint test\n", len(rdmaDevices))
 		}
 	}
-
 	return jobs, skipResults
+}
+
+// attachSRIOVRails requests one VF per rail and attaches each rail's network.
+func (c *Controller) attachSRIOVRails(cfg *jobrunner.PodConfig, rails []string) {
+	var networks []string
+	for _, p := range c.sriovRDMAPlans {
+		if !slices.Contains(rails, p.resource) {
+			continue
+		}
+		if cfg.ResourceRequests == nil {
+			cfg.ResourceRequests = map[string]string{}
+		}
+		if cfg.ResourceLimits == nil {
+			cfg.ResourceLimits = map[string]string{}
+		}
+		cfg.ResourceRequests[p.resource] = "1"
+		cfg.ResourceLimits[p.resource] = "1"
+		networks = append(networks, p.network)
+	}
+	if len(networks) == 0 {
+		return
+	}
+	if cfg.Annotations == nil {
+		cfg.Annotations = map[string]string{}
+	}
+	cfg.Annotations[config.MultusNetworksAnnotation] = strings.Join(networks, ",")
 }
 
 // expandEFABandwidthJobs converts each node's EFA topology into bandwidth jobs

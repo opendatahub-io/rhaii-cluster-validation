@@ -39,6 +39,11 @@ var (
 		Version:  "v1",
 		Resource: "sriovibnetworks",
 	}
+	sriovNodeStateGVR = schema.GroupVersionResource{
+		Group:    "sriovnetwork.openshift.io",
+		Version:  "v1",
+		Resource: "sriovnetworknodestates",
+	}
 )
 
 // OpenShift keeps the Multus namespace-isolation settings in this ConfigMap.
@@ -408,4 +413,85 @@ func (c *Controller) sriovNetworks() string {
 		networks = append(networks, p.network)
 	}
 	return strings.Join(networks, ",")
+}
+
+// sriovNodeLayout is what one SriovNetworkNodeState says about planned rails:
+// which PFs carry each rail, and which PF each VF belongs to.
+type sriovNodeLayout struct {
+	railPFs map[string][]string // rail resource -> PF PCI addresses
+	vfPF    map[string]string   // VF PCI address -> PF PCI address
+}
+
+// sriovNodeLayouts reads SriovNetworkNodeStates for the selected nodes; nil when unreadable.
+func (c *Controller) sriovNodeLayouts(ctx context.Context) map[string]sriovNodeLayout {
+	if c.dynamic == nil || len(c.sriovRDMAPlans) == 0 {
+		return nil
+	}
+	states, err := c.dynamic.Resource(sriovNodeStateGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	rails := make(map[string]string, len(c.sriovRDMAPlans)) // pool name -> rail resource
+	for _, p := range c.sriovRDMAPlans {
+		rails[p.resource[strings.LastIndex(p.resource, "/")+1:]] = p.resource
+	}
+	layouts := make(map[string]sriovNodeLayout)
+	for _, s := range states.Items {
+		if !slices.Contains(c.gpuNodes, s.GetName()) {
+			continue
+		}
+		l := sriovNodeLayout{railPFs: map[string][]string{}, vfPF: map[string]string{}}
+		specIfaces, _, _ := unstructured.NestedSlice(s.Object, "spec", "interfaces")
+		for _, raw := range specIfaces {
+			iface, _ := raw.(map[string]any)
+			pf, _ := iface["pciAddress"].(string)
+			groups, _ := iface["vfGroups"].([]any)
+			for _, g := range groups {
+				group, _ := g.(map[string]any)
+				name, _ := group["resourceName"].(string)
+				if rail, ok := rails[name]; ok && !slices.Contains(l.railPFs[rail], pf) {
+					l.railPFs[rail] = append(l.railPFs[rail], pf)
+				}
+			}
+		}
+		statusIfaces, _, _ := unstructured.NestedSlice(s.Object, "status", "interfaces")
+		for _, raw := range statusIfaces {
+			iface, _ := raw.(map[string]any)
+			pf, _ := iface["pciAddress"].(string)
+			vfs, _ := iface["Vfs"].([]any) // the operator's status field is capitalized
+			for _, v := range vfs {
+				vf, _ := v.(map[string]any)
+				if addr, _ := vf["pciAddress"].(string); addr != "" {
+					l.vfPF[addr] = pf
+				}
+			}
+		}
+		layouts[s.GetName()] = l
+	}
+	return layouts
+}
+
+// railForVF returns the rail whose single PF owns the VF; multi-PF rails never match.
+func (l sriovNodeLayout) railForVF(vf string) string {
+	pf := l.vfPF[vf]
+	for rail, pfs := range l.railPFs {
+		if pf != "" && len(pfs) == 1 && pfs[0] == pf {
+			return rail
+		}
+	}
+	return ""
+}
+
+// multiPFRails reports rails that span more than one PF on any node: a VF from
+// either PF may be allocated, so the rail cannot be tied to one GPU.
+func multiPFRails(layouts map[string]sriovNodeLayout) map[string]string {
+	multi := make(map[string]string)
+	for _, node := range slices.Sorted(maps.Keys(layouts)) {
+		for rail, pfs := range layouts[node].railPFs {
+			if len(pfs) > 1 && multi[rail] == "" {
+				multi[rail] = fmt.Sprintf("pool %s spans %d PFs on %s (%s)", rail, len(pfs), node, strings.Join(pfs, ", "))
+			}
+		}
+	}
+	return multi
 }

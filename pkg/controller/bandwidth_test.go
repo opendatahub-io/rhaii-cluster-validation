@@ -12,6 +12,7 @@ import (
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/jobrunner"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -223,4 +224,141 @@ func TestExpandRDMAJobs_EFA(t *testing.T) {
 			t.Errorf("EFA request = %s, want configured count 2", got.String())
 		}
 	})
+}
+
+func nodeState(node string, pfRes map[string]string, pfVFs map[string][]string) *unstructured.Unstructured {
+	var specIfaces []any
+	for pf, res := range pfRes {
+		specIfaces = append(specIfaces, map[string]any{
+			"pciAddress": pf,
+			"vfGroups":   []any{map[string]any{"resourceName": res}},
+		})
+	}
+	var statusIfaces []any
+	for pf, vfs := range pfVFs {
+		var vfObjs []any
+		for _, vf := range vfs {
+			vfObjs = append(vfObjs, map[string]any{"pciAddress": vf})
+		}
+		statusIfaces = append(statusIfaces, map[string]any{
+			"pciAddress": pf,
+			"Vfs":        vfObjs,
+		})
+	}
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"spec":   map[string]any{"interfaces": specIfaces},
+		"status": map[string]any{"interfaces": statusIfaces},
+	}}
+	u.SetAPIVersion("sriovnetwork.openshift.io/v1")
+	u.SetKind("SriovNetworkNodeState")
+	u.SetNamespace("openshift-sriov-network-operator")
+	u.SetName(node)
+	return u
+}
+
+func TestExpandRDMAJobs_SRIOV(t *testing.T) {
+	nodeA := "node-a"
+	nodeB := "node-b"
+
+	pfRes := map[string]string{"0000:19:00.0": "p6rdma", "0000:29:00.0": "p8rdma"}
+	pfVFs := map[string][]string{"0000:19:00.0": {"0000:19:00.2"}, "0000:29:00.0": {"0000:29:00.2"}}
+
+	c, _ := newTestController(nil)
+	cfg, err := config.GetConfig(config.PlatformOCP)
+	if err != nil {
+		t.Fatalf("GetConfig(OCP) error = %v", err)
+	}
+	c.cfg = cfg
+	c.gpuNodes = []string{nodeA, nodeB}
+	// Rail resolution is covered in sriovrdma_test.go; seed its result here.
+	c.sriovResolved = true
+	c.sriovRDMAPlans = []sriovRDMAPlan{
+		{resource: "openshift.io/p6rdma", network: operatorNS + "/roce-p6"},
+		{resource: "openshift.io/p8rdma", network: operatorNS + "/roce-p8"},
+	}
+	c.dynamic = newFakeDynamic(t, nodeState(nodeA, pfRes, pfVFs), nodeState(nodeB, pfRes, pfVFs))
+	base := rdma.NewRDMABandwidthJob(0, 0, nil)
+	base.PodCfg = &jobrunner.PodConfig{
+		ResourceRequests: map[string]string{"cpu": "500m"},
+		ResourceLimits:   map[string]string{},
+		Annotations:      map[string]string{},
+	}
+	c.AddJob(base)
+
+	// rdma-node saw its own VFs (19:00.2, 29:00.2); bandwidth pods will get different ones.
+	topo := func() *checks.NodeTopology {
+		nics := []checks.NICInfo{
+			{Dev: "mlx5_18", PCIAddr: "0000:19:00.2", LinkLayer: checks.LinkLayerEthernet},
+			{Dev: "mlx5_23", PCIAddr: "0000:29:00.2", LinkLayer: checks.LinkLayerEthernet},
+		}
+		return &checks.NodeTopology{GPUCount: 2, NICCount: 2, NICList: nics, Pairs: []checks.GPUNICPair{
+			{GPU: checks.GPUInfo{ID: 0}, NIC: checks.NICInfo{Dev: nics[0].Dev}}, // stored reports keep only the device name
+			{GPU: checks.GPUInfo{ID: 1}, NIC: checks.NICInfo{Dev: nics[1].Dev}},
+		}}
+	}
+	topoMap := map[string]*checks.NodeTopology{nodeA: topo(), nodeB: topo()}
+
+	jobs, skips := c.expandRDMAJobs(context.Background(), []string{nodeA, nodeB}, topoMap, nil)
+	if len(skips) != 0 {
+		t.Fatalf("unexpected skips: %#v", skips)
+	}
+	if len(jobs) != 3 { // 2 PD jobs + 1 WEP job
+		t.Fatalf("jobs count = %d, want 3 (2 PD + 1 WEP)", len(jobs))
+	}
+
+	pd0, ok := jobs[0].(*rdma.RDMABandwidthJob)
+	if !ok || pd0.Rail != "openshift.io/p6rdma" {
+		t.Fatalf("job[0] = %#v, want Rail=openshift.io/p6rdma", jobs[0])
+	}
+	if pd0.PodCfg.ResourceRequests["openshift.io/p6rdma"] != "1" {
+		t.Errorf("PD0 resource request = %q, want 1", pd0.PodCfg.ResourceRequests["openshift.io/p6rdma"])
+	}
+	if pd0.PodCfg.Annotations[config.MultusNetworksAnnotation] != operatorNS+"/roce-p6" {
+		t.Errorf("PD0 multus annotation = %q", pd0.PodCfg.Annotations[config.MultusNetworksAnnotation])
+	}
+	spec, err := pd0.ServerSpec(nodeA, "rhaii-validation", "tools:latest")
+	if err != nil {
+		t.Fatalf("ServerSpec error: %v", err)
+	}
+	srvCmd := strings.Join(spec.Spec.Template.Spec.Containers[0].Command, " ")
+	if !strings.Contains(srvCmd, "resolve_dev PCIDEVICE_OPENSHIFT_IO_P6RDMA") {
+		t.Errorf("server command must resolve device dynamically: %s", srvCmd)
+	}
+	if strings.Contains(srvCmd, "mlx5_18") {
+		t.Errorf("rail mode must not pass rdma-node's device name (ib_write_bw rejects a second -d): %s", srvCmd)
+	}
+
+	wep, ok := jobs[2].(*rdma.RDMAWEPJob)
+	if !ok {
+		t.Fatalf("job[2] = %#v, want *RDMAWEPJob", jobs[2])
+	}
+	// WEP must request exactly 1 VF per rail, not 2 per rail.
+	if got := wep.PodCfg.ResourceRequests["openshift.io/p6rdma"]; got != "1" {
+		t.Errorf("WEP p6rdma request = %q, want 1", got)
+	}
+	if got := wep.PodCfg.ResourceRequests["openshift.io/p8rdma"]; got != "1" {
+		t.Errorf("WEP p8rdma request = %q, want 1", got)
+	}
+	wepNets := wep.PodCfg.Annotations[config.MultusNetworksAnnotation]
+	if !strings.Contains(wepNets, "roce-p6") || !strings.Contains(wepNets, "roce-p8") {
+		t.Errorf("WEP networks = %q, want both roce-p6 and roce-p8", wepNets)
+	}
+}
+
+func TestExpandRDMAJobs_MultiPFPoolWarning(t *testing.T) {
+	// One resource configured on two PFs on node-a: multi-PF warning must fire.
+	nodeA := "node-a"
+	nsA := nodeState(nodeA,
+		map[string]string{"0000:19:00.0": "p6rdma", "0000:20:00.0": "p6rdma"},
+		map[string][]string{"0000:19:00.0": {"0000:19:00.2"}},
+	)
+	c, _ := newTestController(nil)
+	c.gpuNodes = []string{nodeA}
+	c.sriovRDMAPlans = []sriovRDMAPlan{{resource: "openshift.io/p6rdma", network: "net"}}
+	c.dynamic = newFakeDynamic(t, nsA)
+
+	multi := multiPFRails(c.sriovNodeLayouts(context.Background()))
+	if len(multi) != 1 || multi["openshift.io/p6rdma"] == "" {
+		t.Errorf("expected multi-PF warning for p6rdma, got: %#v", multi)
+	}
 }
