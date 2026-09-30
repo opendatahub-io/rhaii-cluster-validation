@@ -2,124 +2,390 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/config"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var nadGVR = schema.GroupVersionResource{
-	Group:    "k8s.cni.cncf.io",
-	Version:  "v1",
-	Resource: "network-attachment-definitions",
+var (
+	nadGVR = schema.GroupVersionResource{
+		Group:    "k8s.cni.cncf.io",
+		Version:  "v1",
+		Resource: "network-attachment-definitions",
+	}
+	sriovPolicyGVR = schema.GroupVersionResource{
+		Group:    "sriovnetwork.openshift.io",
+		Version:  "v1",
+		Resource: "sriovnetworknodepolicies",
+	}
+	sriovNetworkGVR = schema.GroupVersionResource{
+		Group:    "sriovnetwork.openshift.io",
+		Version:  "v1",
+		Resource: "sriovnetworks",
+	}
+	sriovIBNetworkGVR = schema.GroupVersionResource{
+		Group:    "sriovnetwork.openshift.io",
+		Version:  "v1",
+		Resource: "sriovibnetworks",
+	}
+)
+
+// OpenShift keeps the Multus namespace-isolation settings in this ConfigMap.
+const (
+	multusConfigNamespace = "openshift-multus"
+	multusConfigMapName   = "multus-daemon-config"
+	multusConfigKey       = "daemon-config.json"
+)
+
+// nodeInfo is the part of a GPU node that SR-IOV discovery needs.
+type nodeInfo struct {
+	labels      map[string]string
+	allocatable corev1.ResourceList
 }
 
 type sriovRDMAPlan struct {
-	resource string
-	network  string
+	resource string // full device-plugin resource, e.g. openshift.io/p6rdma
+	network  string // Multus reference: name (run namespace) or namespace/name
 }
 
-// resolveSRIOVRDMA pairs shared openshift.io/*rdma resources with a NAD.
-// Skipped when jobs config already sets either half; never fails the run.
+// rdmaPool is an SR-IOV resource pool that is RDMA-enabled on every selected node.
+type rdmaPool struct {
+	name       string // policy resourceName, without prefix
+	infiniband bool
+}
+
+// sriovNetworkRef is a SriovNetwork or SriovIBNetwork and the NAD the operator renders for it.
+type sriovNetworkRef struct {
+	kind       string
+	namespace  string
+	name       string
+	resource   string // spec.resourceName
+	targetNS   string // where the NAD lives
+	infiniband bool
+}
+
+// resolveSRIOVRDMA plans one (resource, NAD) pair per RDMA rail proven by the SR-IOV operator CRs,
+// node allocatable, and Multus isolation; unproven rails are skipped with a reason.
 func (c *Controller) resolveSRIOVRDMA(ctx context.Context) {
-	if c.dynamic == nil || config.ResourceConfigHasSRIOVRDMA(c.cfg.Jobs) {
+	c.sriovRDMAPlans = nil
+	if c.dynamic == nil || config.ResourceConfigOwnsRDMAAttachment(c.cfg.Jobs) {
 		return
 	}
 
-	selected := c.selectedSRIOVRDMAResources()
-	shared := config.IntersectSRIOVRDMAResources(selected)
-	if len(shared) == 0 {
-		for _, names := range selected {
-			if len(names) > 0 {
-				fmt.Fprintf(c.output, "  SR-IOV RDMA: skipping auto-detection, no resource is advertised by all %d selected node(s)\n",
-					len(selected))
-				break
-			}
+	policies, err := c.dynamic.Resource(sriovPolicyGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			c.sriovNote("skipping auto-detection, cannot list SriovNetworkNodePolicies: %v. "+
+				"Set jobs.requests and jobs.annotations to configure SR-IOV RDMA manually", err)
 		}
 		return
 	}
 
-	nadNamespaces := []string{c.opts.Namespace}
-	if ns := c.cfg.Jobs.SRIOVRDMANADNamespace; ns != "" && ns != c.opts.Namespace {
-		nadNamespaces = append(nadNamespaces, ns)
-	}
-
-	byResource, err := c.nadsByResource(ctx, nadNamespaces)
-	if err != nil {
-		fmt.Fprintf(c.output, "  SR-IOV RDMA: skipping auto-detection, cannot list NetworkAttachmentDefinitions: %v\n", err)
+	pools, reasons := rdmaPoolsOnAllNodes(policies.Items, c.selectedNodeInfo())
+	if len(pools) == 0 {
+		c.sriovNotes(reasons)
 		return
 	}
+
+	networks, notes := c.listSRIOVNetworks(ctx)
+	reasons = append(reasons, notes...)
+	reach := c.multusIsolation(ctx)
 
 	var plans []sriovRDMAPlan
-	var unmatched, ambiguous []string
-	for _, res := range shared {
-		switch networks := byResource[res]; len(networks) {
-		case 0:
-			unmatched = append(unmatched, res)
-		case 1:
-			plans = append(plans, sriovRDMAPlan{resource: res, network: networks[0]})
-		default:
-			sort.Strings(networks)
-			ambiguous = append(ambiguous, fmt.Sprintf("%s (%s)", res, strings.Join(networks, ", ")))
+	for _, pool := range pools {
+		plan, reason := c.planForPool(ctx, pool, networks, reach)
+		if reason != "" {
+			reasons = append(reasons, reason)
+			continue
 		}
+		plans = append(plans, plan)
 	}
-
-	if len(unmatched) > 0 {
-		fmt.Fprintf(c.output, "  SR-IOV RDMA: no NetworkAttachmentDefinition in %s for %s — create one, or set jobs.sriov_rdma_nad_namespace if it lives elsewhere\n",
-			strings.Join(nadNamespaces, "/"), strings.Join(unmatched, ", "))
-	}
-	if len(ambiguous) > 0 {
-		fmt.Fprintf(c.output, "  SR-IOV RDMA: multiple NetworkAttachmentDefinitions match %s — set jobs.requests and jobs.annotations explicitly to choose\n",
-			strings.Join(ambiguous, "; "))
-	}
+	c.sriovNotes(reasons)
 	if len(plans) == 0 {
 		return
 	}
 
 	c.sriovRDMAPlans = plans
 	resources := make([]string, 0, len(plans))
-	networks := make([]string, 0, len(plans))
+	networkRefs := make([]string, 0, len(plans))
 	for _, p := range plans {
 		resources = append(resources, p.resource)
-		networks = append(networks, p.network)
+		networkRefs = append(networkRefs, p.network)
 	}
 	fmt.Fprintf(c.output, "  SR-IOV RDMA: auto-detected %d rail(s): %s\n", len(plans), strings.Join(resources, ", "))
-	fmt.Fprintf(c.output, "  SR-IOV RDMA: attaching %s\n", strings.Join(networks, ", "))
+	fmt.Fprintf(c.output, "  SR-IOV RDMA: attaching %s\n", strings.Join(networkRefs, ", "))
 }
 
-func (c *Controller) selectedSRIOVRDMAResources() map[string][]string {
-	selected := make(map[string][]string, len(c.gpuNodes))
+func (c *Controller) selectedNodeInfo() map[string]nodeInfo {
+	selected := make(map[string]nodeInfo, len(c.gpuNodes))
 	for _, node := range c.gpuNodes {
-		selected[node] = c.sriovRDMAResources[node]
+		selected[node] = c.gpuNodeInfo[node]
 	}
 	return selected
 }
 
-func (c *Controller) nadsByResource(ctx context.Context, namespaces []string) (map[string][]string, error) {
-	byResource := make(map[string][]string)
-	for _, ns := range namespaces {
-		list, err := c.dynamic.Resource(nadGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return nil, err
-		}
-		for _, item := range list.Items {
-			res := item.GetAnnotations()[config.NADResourceAnnotation]
-			if res == "" {
+// poolState aggregates every policy that feeds one pool on one node.
+type poolState struct {
+	rdma     bool // every contributing policy is RDMA-capable netdevice
+	anyRDMA  bool
+	ib       bool
+	blockers []string
+}
+
+// rdmaPoolsOnAllNodes returns pools every selected node configures with only RDMA netdevice
+// policies; the operator takes isRdma from one of several same-name policies, so disagreement is ambiguous.
+func rdmaPoolsOnAllNodes(policies []unstructured.Unstructured, nodes map[string]nodeInfo) ([]rdmaPool, []string) {
+	if len(nodes) == 0 {
+		return nil, nil
+	}
+	perNode := make(map[string]map[string]*poolState, len(nodes))
+	for node, info := range nodes {
+		states := make(map[string]*poolState)
+		for _, p := range policies {
+			selector, _, _ := unstructured.NestedStringMap(p.Object, "spec", "nodeSelector")
+			if !labelsMatch(selector, info.labels) {
 				continue
 			}
-			ref := item.GetName()
-			if ns != c.opts.Namespace {
-				ref = ns + "/" + item.GetName()
+			pool, _, _ := unstructured.NestedString(p.Object, "spec", "resourceName")
+			if pool == "" {
+				continue
 			}
-			byResource[res] = append(byResource[res], ref)
+			isRDMA, _, _ := unstructured.NestedBool(p.Object, "spec", "isRdma")
+			deviceType, _, _ := unstructured.NestedString(p.Object, "spec", "deviceType")
+			vdpaType, _, _ := unstructured.NestedString(p.Object, "spec", "vdpaType")
+			linkType, _, _ := unstructured.NestedString(p.Object, "spec", "linkType")
+
+			st, ok := states[pool]
+			if !ok {
+				st = &poolState{rdma: true}
+				states[pool] = st
+			}
+			usable := isRDMA && (deviceType == "" || deviceType == "netdevice") && vdpaType == ""
+			if usable {
+				st.anyRDMA = true
+			} else {
+				st.rdma = false
+				st.blockers = append(st.blockers, p.GetName())
+			}
+			st.ib = st.ib || strings.EqualFold(linkType, "ib")
+		}
+		perNode[node] = states
+	}
+
+	names := make(map[string]bool)
+	for _, states := range perNode {
+		for pool := range states {
+			names[pool] = true
 		}
 	}
-	return byResource, nil
+
+	var pools []rdmaPool
+	var reasons []string
+	for _, pool := range slices.Sorted(maps.Keys(names)) {
+		var missing, conflicting []string
+		anyRDMA, ib := false, false
+		for _, node := range slices.Sorted(maps.Keys(nodes)) {
+			st, ok := perNode[node][pool]
+			if !ok {
+				missing = append(missing, node)
+				continue
+			}
+			anyRDMA = anyRDMA || st.anyRDMA
+			ib = ib || st.ib
+			if !st.rdma {
+				conflicting = append(conflicting, fmt.Sprintf("%s (%s)", node, strings.Join(st.blockers, ", ")))
+			}
+		}
+		if !anyRDMA {
+			continue // an ordinary non-RDMA pool, nothing to report
+		}
+		switch {
+		case len(missing) > 0:
+			reasons = append(reasons, fmt.Sprintf("pool %s is not configured on %s", pool, strings.Join(missing, ", ")))
+		case len(conflicting) > 0:
+			reasons = append(reasons, fmt.Sprintf("pool %s has non-RDMA policies on %s", pool, strings.Join(conflicting, "; ")))
+		default:
+			pools = append(pools, rdmaPool{name: pool, infiniband: ib})
+		}
+	}
+	return pools, reasons
+}
+
+// listSRIOVNetworks lists SriovNetworks and SriovIBNetworks cluster-wide. Each
+// kind is optional: a cluster without the IB CRD still gets Ethernet rails.
+func (c *Controller) listSRIOVNetworks(ctx context.Context) ([]sriovNetworkRef, []string) {
+	kinds := []struct {
+		gvr        schema.GroupVersionResource
+		kind       string
+		infiniband bool
+	}{
+		{sriovNetworkGVR, "SriovNetwork", false},
+		{sriovIBNetworkGVR, "SriovIBNetwork", true},
+	}
+	var refs []sriovNetworkRef
+	var notes []string
+	for _, k := range kinds {
+		list, err := c.dynamic.Resource(k.gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				notes = append(notes, fmt.Sprintf("cannot list %ss: %v", k.kind, err))
+			}
+			continue
+		}
+		for _, item := range list.Items {
+			resource, _, _ := unstructured.NestedString(item.Object, "spec", "resourceName")
+			target, _, _ := unstructured.NestedString(item.Object, "spec", "networkNamespace")
+			if target == "" {
+				// The operator renders the NAD next to the network CR when no
+				// networkNamespace is set (namespaced SriovNetwork).
+				target = item.GetNamespace()
+			}
+			refs = append(refs, sriovNetworkRef{
+				kind:       k.kind,
+				namespace:  item.GetNamespace(),
+				name:       item.GetName(),
+				resource:   resource,
+				targetNS:   target,
+				infiniband: k.infiniband,
+			})
+		}
+	}
+	return refs, notes
+}
+
+// planForPool picks the single usable NAD for a pool, or returns why it cannot.
+func (c *Controller) planForPool(ctx context.Context, pool rdmaPool, networks []sriovNetworkRef, reach multusIsolation) (sriovRDMAPlan, string) {
+	var usable []sriovRDMAPlan
+	var why []string
+	for _, n := range networks {
+		if n.resource != pool.name {
+			continue
+		}
+		ref := n.targetNS + "/" + n.name
+		if n.infiniband != pool.infiniband {
+			why = append(why, fmt.Sprintf("%s %s/%s does not match the pool's link type", n.kind, n.namespace, n.name))
+			continue
+		}
+		nadObj, err := c.dynamic.Resource(nadGVR).Namespace(n.targetNS).Get(ctx, n.name, metav1.GetOptions{})
+		if err != nil {
+			why = append(why, fmt.Sprintf("NAD %s not readable: %v", ref, err))
+			continue
+		}
+		key := nadObj.GetAnnotations()[config.NADResourceAnnotation]
+		if !strings.HasSuffix(key, "/"+pool.name) {
+			why = append(why, fmt.Sprintf("NAD %s has resourceName %q, expected <prefix>/%s", ref, key, pool.name))
+			continue
+		}
+		if reach.denies(n.targetNS, c.opts.Namespace) {
+			why = append(why, fmt.Sprintf("NAD %s is not attachable from namespace %s (Multus namespace isolation)", ref, c.opts.Namespace))
+			continue
+		}
+		network := ref
+		if n.targetNS == c.opts.Namespace {
+			network = n.name
+		}
+		usable = append(usable, sriovRDMAPlan{resource: key, network: network})
+	}
+
+	switch len(usable) {
+	case 0:
+		if len(why) == 0 {
+			return sriovRDMAPlan{}, fmt.Sprintf("pool %s has no SriovNetwork", pool.name)
+		}
+		return sriovRDMAPlan{}, fmt.Sprintf("pool %s has no usable network: %s", pool.name, strings.Join(why, "; "))
+	case 1:
+	default:
+		refs := make([]string, 0, len(usable))
+		for _, u := range usable {
+			refs = append(refs, u.network)
+		}
+		sort.Strings(refs)
+		return sriovRDMAPlan{}, fmt.Sprintf("pool %s matches several networks (%s); set jobs.requests and jobs.annotations to choose",
+			pool.name, strings.Join(refs, ", "))
+	}
+
+	plan := usable[0]
+	var empty []string
+	for node, info := range c.selectedNodeInfo() {
+		if qty, ok := info.allocatable[corev1.ResourceName(plan.resource)]; !ok || qty.Value() <= 0 {
+			empty = append(empty, node)
+		}
+	}
+	if len(empty) > 0 {
+		sort.Strings(empty)
+		return sriovRDMAPlan{}, fmt.Sprintf("pool %s has no allocatable %s on %s", pool.name, plan.resource, strings.Join(empty, ", "))
+	}
+	return plan, ""
+}
+
+// multusIsolation is OpenShift's Multus namespace isolation; unreadable means unknown,
+// so nothing is denied and the pod reports its own attach error.
+type multusIsolation struct {
+	known    bool
+	isolated bool
+	globals  map[string]bool
+}
+
+func (m multusIsolation) denies(nadNamespace, podNamespace string) bool {
+	if !m.known || !m.isolated || nadNamespace == podNamespace {
+		return false
+	}
+	return !m.globals[nadNamespace]
+}
+
+func (c *Controller) multusIsolation(ctx context.Context) multusIsolation {
+	cm, err := c.client.CoreV1().ConfigMaps(multusConfigNamespace).Get(ctx, multusConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		return multusIsolation{}
+	}
+	raw, ok := cm.Data[multusConfigKey]
+	if !ok {
+		return multusIsolation{}
+	}
+	var cfg struct {
+		NamespaceIsolation bool   `json:"namespaceIsolation"`
+		GlobalNamespaces   string `json:"globalNamespaces"`
+	}
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return multusIsolation{}
+	}
+	globals := make(map[string]bool)
+	for _, ns := range strings.Split(cfg.GlobalNamespaces, ",") {
+		if ns = strings.TrimSpace(ns); ns != "" {
+			globals[ns] = true
+		}
+	}
+	return multusIsolation{known: true, isolated: cfg.NamespaceIsolation, globals: globals}
+}
+
+func (c *Controller) sriovNote(format string, args ...any) {
+	fmt.Fprintf(c.output, "  SR-IOV RDMA: "+format+"\n", args...)
+}
+
+func (c *Controller) sriovNotes(notes []string) {
+	for _, n := range notes {
+		c.sriovNote("%s", n)
+	}
+}
+
+func labelsMatch(selector, labels map[string]string) bool {
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Controller) applySRIOVRDMA(container *corev1.Container, podAnnotations map[string]string) []string {

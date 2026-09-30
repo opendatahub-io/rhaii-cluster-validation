@@ -83,7 +83,7 @@ type Controller struct {
 	gpuNodes             []string            // discovered GPU node names
 	gpuCounts            map[string]int64    // GPU count per node (from allocatable)
 	efaCounts            map[string]int64    // EFA count per node on EKS (from allocatable)
-	sriovRDMAResources   map[string][]string // SR-IOV RDMA resources per node (from allocatable)
+	gpuNodeInfo          map[string]nodeInfo // labels + allocatable per GPU node (SR-IOV discovery)
 	sriovRDMAPlans       []sriovRDMAPlan     // resolved resource + Multus attachment for RDMA node checks
 	gpuResource          corev1.ResourceName // e.g. "nvidia.com/gpu" or "amd.com/gpu"
 	jobs                 []jobrunner.Job

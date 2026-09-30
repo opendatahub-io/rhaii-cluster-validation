@@ -8,12 +8,18 @@ import (
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/config"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
+
+const operatorNS = "openshift-sriov-network-operator"
 
 func nad(namespace, name, resourceName string) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
@@ -27,160 +33,395 @@ func nad(namespace, name, resourceName string) *unstructured.Unstructured {
 	return u
 }
 
-// newFakeDynamic returns a dynamic client preloaded with NADs. Objects are
-// created through the client so they land on nadGVR: the fake's default
-// kind-to-resource guess ("networkattachmentdefinitions") does not match the
-// real resource name.
+// policy mirrors a SriovNetworkNodePolicy pinned to one node by hostname, as on
+// clusters whose nodes carry different NIC layouts.
+func policy(name, node, pool string, isRDMA bool, linkType string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"resourceName": pool,
+			"isRdma":       isRDMA,
+			"deviceType":   "netdevice",
+			"linkType":     linkType,
+			"nodeSelector": map[string]any{"kubernetes.io/hostname": node},
+		},
+	}}
+	u.SetAPIVersion("sriovnetwork.openshift.io/v1")
+	u.SetKind("SriovNetworkNodePolicy")
+	u.SetNamespace(operatorNS)
+	u.SetName(name)
+	return u
+}
+
+func sriovNet(kind, namespace, name, pool, networkNamespace string) *unstructured.Unstructured {
+	spec := map[string]any{"resourceName": pool}
+	if networkNamespace != "" {
+		spec["networkNamespace"] = networkNamespace
+	}
+	u := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
+	u.SetAPIVersion("sriovnetwork.openshift.io/v1")
+	u.SetKind(kind)
+	u.SetNamespace(namespace)
+	u.SetName(name)
+	return u
+}
+
+var gvrByKind = map[string]schema.GroupVersionResource{
+	"NetworkAttachmentDefinition": nadGVR,
+	"SriovNetworkNodePolicy":      sriovPolicyGVR,
+	"SriovNetwork":                sriovNetworkGVR,
+	"SriovIBNetwork":              sriovIBNetworkGVR,
+}
+
+// newFakeDynamic seeds objects through their real GVRs; the fake's default
+// kind-to-resource guess does not match these CRD resource names.
 func newFakeDynamic(t *testing.T, objs ...*unstructured.Unstructured) *dynamicfake.FakeDynamicClient {
 	t.Helper()
-	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-		runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{nadGVR: "NetworkAttachmentDefinitionList"},
-	)
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			nadGVR:            "NetworkAttachmentDefinitionList",
+			sriovPolicyGVR:    "SriovNetworkNodePolicyList",
+			sriovNetworkGVR:   "SriovNetworkList",
+			sriovIBNetworkGVR: "SriovIBNetworkList",
+		})
 	for _, obj := range objs {
-		if _, err := client.Resource(nadGVR).Namespace(obj.GetNamespace()).
+		gvr := gvrByKind[obj.GetKind()]
+		if _, err := client.Resource(gvr).Namespace(obj.GetNamespace()).
 			Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
-			t.Fatalf("failed to seed NAD %s/%s: %v", obj.GetNamespace(), obj.GetName(), err)
+			t.Fatalf("failed to seed %s %s/%s: %v", obj.GetKind(), obj.GetNamespace(), obj.GetName(), err)
 		}
 	}
 	return client
 }
 
-func TestResolveSRIOVRDMAMatchesRailsInRunNamespace(t *testing.T) {
-	c, buf := newTestController(nil)
-	c.dynamic = newFakeDynamic(t,
-		nad("test-ns", "roce-p0", "openshift.io/p0rdma"),
-		nad("test-ns", "roce-p4", "openshift.io/p4rdma"),
-	)
+func multusConfig(isolated bool, globals string) *corev1.ConfigMap {
+	iso := "false"
+	if isolated {
+		iso = "true"
+	}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: multusConfigNamespace, Name: multusConfigMapName},
+		Data:       map[string]string{multusConfigKey: `{"namespaceIsolation":` + iso + `,"globalNamespaces":"` + globals + `"}`},
+	}
+}
+
+// sriovNode builds the node view discovery reads: hostname label plus allocatable.
+func sriovNode(name string, allocatable map[string]int64) nodeInfo {
+	res := corev1.ResourceList{}
+	for k, v := range allocatable {
+		res[corev1.ResourceName(k)] = *resource.NewQuantity(v, resource.DecimalSI)
+	}
+	return nodeInfo{labels: map[string]string{"kubernetes.io/hostname": name}, allocatable: res}
+}
+
+// pokprodLike is two GPU nodes sharing rail p6 through a SriovNetwork in a Multus global namespace.
+func pokprodLike(t *testing.T, extra ...*unstructured.Unstructured) (*Controller, *strings.Builder) {
+	t.Helper()
+	c, _ := newTestController(fake.NewSimpleClientset(multusConfig(true, "default,"+operatorNS))) //nolint:staticcheck
+	objs := []*unstructured.Unstructured{
+		policy("p6-a", "node-a", "p6rdma", true, "eth"),
+		policy("p6-b", "node-b", "p6rdma", true, "eth"),
+		sriovNet("SriovNetwork", operatorNS, "roce-p6-shared", "p6rdma", operatorNS),
+		nad(operatorNS, "roce-p6-shared", "openshift.io/p6rdma"),
+	}
+	c.dynamic = newFakeDynamic(t, append(objs, extra...)...)
 	c.gpuNodes = []string{"node-a", "node-b"}
-	c.sriovRDMAResources = map[string][]string{
-		"node-a": {"openshift.io/p0rdma", "openshift.io/p4rdma"},
-		"node-b": {"openshift.io/p0rdma", "openshift.io/p4rdma"},
+	c.gpuNodeInfo = map[string]nodeInfo{
+		"node-a": sriovNode("node-a", map[string]int64{"openshift.io/p6rdma": 8, "openshift.io/p2rdma": 8}),
+		"node-b": sriovNode("node-b", map[string]int64{"openshift.io/p6rdma": 8, "openshift.io/p2rdma": 8}),
 	}
+	out := &strings.Builder{}
+	c.output = out
+	return c, out
+}
+
+func plansOf(c *Controller) map[string]string {
+	got := make(map[string]string, len(c.sriovRDMAPlans))
+	for _, p := range c.sriovRDMAPlans {
+		got[p.resource] = p.network
+	}
+	return got
+}
+
+func TestResolveSRIOVRDMAFromOperatorObjects(t *testing.T) {
+	// A NAD nobody's SriovNetwork targets (left over by hand) must not matter.
+	c, out := pokprodLike(t, nad("other-team", "storage-p0v0", "openshift.io/p0_storage"))
 
 	c.resolveSRIOVRDMA(context.Background())
 
-	if len(c.sriovRDMAPlans) != 2 {
-		t.Fatalf("expected 2 resolved rails, got %d (%v)", len(c.sriovRDMAPlans), c.sriovRDMAPlans)
+	want := map[string]string{"openshift.io/p6rdma": operatorNS + "/roce-p6-shared"}
+	if got := plansOf(c); len(got) != 1 || got["openshift.io/p6rdma"] != want["openshift.io/p6rdma"] {
+		t.Fatalf("plans = %v, want %v\n%s", got, want, out)
 	}
-	if c.sriovRDMAPlans[0].resource != "openshift.io/p0rdma" || c.sriovRDMAPlans[0].network != "roce-p0" {
-		t.Errorf("unexpected first plan: %+v", c.sriovRDMAPlans[0])
-	}
-	if !strings.Contains(buf.String(), "auto-detected 2 rail(s)") {
-		t.Errorf("expected detection to be reported, got:\n%s", buf.String())
+	if !strings.Contains(out.String(), "auto-detected 1 rail(s)") {
+		t.Errorf("detection not reported:\n%s", out)
 	}
 }
 
-func TestResolveSRIOVRDMAExcludesRailsMissingOnSomeNodes(t *testing.T) {
-	c, _ := newTestController(nil)
-	c.dynamic = newFakeDynamic(t,
-		nad("test-ns", "roce-p4", "openshift.io/p4rdma"),
-		nad("test-ns", "roce-p10", "openshift.io/p10rdma"),
+func TestResolveSRIOVRDMAIgnoresResourceNames(t *testing.T) {
+	// The pool name proves nothing: a non-RDMA pool called *rdma is skipped and
+	// an RDMA pool with another name is used.
+	c, _ := pokprodLike(t,
+		policy("fast-a", "node-a", "fastrdma", false, "eth"),
+		policy("fast-b", "node-b", "fastrdma", false, "eth"),
+		sriovNet("SriovNetwork", operatorNS, "fast", "fastrdma", operatorNS),
+		nad(operatorNS, "fast", "openshift.io/fastrdma"),
+		policy("vf-a", "node-a", "p8vf", true, "eth"),
+		policy("vf-b", "node-b", "p8vf", true, "eth"),
+		sriovNet("SriovNetwork", operatorNS, "roce-p8", "p8vf", operatorNS),
+		nad(operatorNS, "roce-p8", "openshift.io/p8vf"),
 	)
-	c.gpuNodes = []string{"node-6-rail", "node-8-rail"}
-	c.sriovRDMAResources = map[string][]string{
-		"node-6-rail": {"openshift.io/p4rdma"},
-		"node-8-rail": {"openshift.io/p4rdma", "openshift.io/p10rdma"},
+	for _, n := range []string{"node-a", "node-b"} {
+		info := c.gpuNodeInfo[n]
+		info.allocatable["openshift.io/fastrdma"] = *resource.NewQuantity(8, resource.DecimalSI)
+		info.allocatable["openshift.io/p8vf"] = *resource.NewQuantity(8, resource.DecimalSI)
 	}
 
 	c.resolveSRIOVRDMA(context.Background())
 
-	if len(c.sriovRDMAPlans) != 1 || c.sriovRDMAPlans[0].resource != "openshift.io/p4rdma" {
-		t.Fatalf("expected only the shared rail, got %+v", c.sriovRDMAPlans)
+	got := plansOf(c)
+	if _, ok := got["openshift.io/fastrdma"]; ok {
+		t.Errorf("non-RDMA pool fastrdma must not be attached: %v", got)
+	}
+	if got["openshift.io/p8vf"] != operatorNS+"/roce-p8" {
+		t.Errorf("RDMA pool p8vf must be attached regardless of its name: %v", got)
 	}
 }
 
-func TestResolveSRIOVRDMAIgnoresUnselectedNodes(t *testing.T) {
-	c, _ := newTestController(nil)
-	c.dynamic = newFakeDynamic(t, nad("test-ns", "roce-p4", "openshift.io/p4rdma"))
-	c.gpuNodes = []string{"selected"}
-	c.sriovRDMAResources = map[string][]string{
-		"selected":     {"openshift.io/p4rdma"},
-		"not-selected": nil,
-	}
-
-	c.resolveSRIOVRDMA(context.Background())
-
-	if len(c.sriovRDMAPlans) != 1 {
-		t.Fatalf("expected the selected node's rail to resolve, got %+v", c.sriovRDMAPlans)
-	}
-}
-
-func TestResolveSRIOVRDMAConfigOverrideWins(t *testing.T) {
-	c, _ := newTestController(nil)
-	c.dynamic = newFakeDynamic(t, nad("test-ns", "roce-p4", "openshift.io/p4rdma"))
-	c.gpuNodes = []string{"node-a"}
-	c.sriovRDMAResources = map[string][]string{"node-a": {"openshift.io/p4rdma"}}
-	c.cfg.Jobs.Requests = map[string]string{"openshift.io/p2rdma": "1"}
-
-	c.resolveSRIOVRDMA(context.Background())
-
-	if c.sriovRDMAPlans != nil {
-		t.Fatalf("auto-detection must not override explicit config, got %+v", c.sriovRDMAPlans)
-	}
-}
-
-func TestResolveSRIOVRDMAReportsUnmatchedRail(t *testing.T) {
-	c, buf := newTestController(nil)
-	c.dynamic = newFakeDynamic(t) // no NADs at all
-	c.gpuNodes = []string{"node-a"}
-	c.sriovRDMAResources = map[string][]string{"node-a": {"openshift.io/p4rdma"}}
-
-	c.resolveSRIOVRDMA(context.Background())
-
-	if c.sriovRDMAPlans != nil {
-		t.Fatalf("expected no plans without a NAD, got %+v", c.sriovRDMAPlans)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "no NetworkAttachmentDefinition") || !strings.Contains(out, "openshift.io/p4rdma") {
-		t.Errorf("expected an actionable message naming the rail, got:\n%s", out)
-	}
-}
-
-func TestResolveSRIOVRDMAAmbiguousMatchIsNotGuessed(t *testing.T) {
-	c, buf := newTestController(nil)
+func TestResolveSRIOVRDMAUsesNADResourcePrefix(t *testing.T) {
+	c, _ := newTestController(fake.NewSimpleClientset()) //nolint:staticcheck
+	c.output = &strings.Builder{}
 	c.dynamic = newFakeDynamic(t,
-		nad("test-ns", "roce-p4-a", "openshift.io/p4rdma"),
-		nad("test-ns", "roce-p4-b", "openshift.io/p4rdma"),
+		policy("p6-a", "node-a", "p6rdma", true, "eth"),
+		sriovNet("SriovNetwork", operatorNS, "roce-p6", "p6rdma", operatorNS),
+		nad(operatorNS, "roce-p6", "example.com/p6rdma"),
 	)
 	c.gpuNodes = []string{"node-a"}
-	c.sriovRDMAResources = map[string][]string{"node-a": {"openshift.io/p4rdma"}}
+	c.gpuNodeInfo = map[string]nodeInfo{"node-a": sriovNode("node-a", map[string]int64{"example.com/p6rdma": 8})}
 
 	c.resolveSRIOVRDMA(context.Background())
 
-	if c.sriovRDMAPlans != nil {
-		t.Fatalf("ambiguous match must not be guessed, got %+v", c.sriovRDMAPlans)
-	}
-	if !strings.Contains(buf.String(), "multiple NetworkAttachmentDefinitions") {
-		t.Errorf("expected ambiguity to be reported, got:\n%s", buf.String())
+	if got := plansOf(c); got["example.com/p6rdma"] == "" {
+		t.Fatalf("expected the NAD's full resource key to be used, got %v", got)
 	}
 }
 
-func TestResolveSRIOVRDMACrossNamespaceRequiresOptIn(t *testing.T) {
-	objs := []*unstructured.Unstructured{nad("sriov-ns", "roce-p4-shared", "openshift.io/p4rdma")}
-
-	c, _ := newTestController(nil)
-	c.dynamic = newFakeDynamic(t, objs...)
-	c.gpuNodes = []string{"node-a"}
-	c.sriovRDMAResources = map[string][]string{"node-a": {"openshift.io/p4rdma"}}
-
-	c.resolveSRIOVRDMA(context.Background())
-	if c.sriovRDMAPlans != nil {
-		t.Fatalf("must not reach into another namespace without opt-in, got %+v", c.sriovRDMAPlans)
+func TestResolveSRIOVRDMAMultusIsolationPicksAttachableNetwork(t *testing.T) {
+	// p2rdma has two networks; only the one in a global namespace is attachable.
+	extra := []*unstructured.Unstructured{
+		policy("p2-a", "node-a", "p2rdma", true, "eth"),
+		policy("p2-b", "node-b", "p2rdma", true, "eth"),
+		sriovNet("SriovNetwork", operatorNS, "roce-p2", "p2rdma", "autoscaling-example"),
+		nad("autoscaling-example", "roce-p2", "openshift.io/p2rdma"),
+		sriovNet("SriovNetwork", operatorNS, "roce-p2-shared", "p2rdma", operatorNS),
+		nad(operatorNS, "roce-p2-shared", "openshift.io/p2rdma"),
 	}
 
-	optedIn, _ := newTestController(nil)
-	optedIn.dynamic = newFakeDynamic(t, objs...)
-	optedIn.gpuNodes = []string{"node-a"}
-	optedIn.sriovRDMAResources = map[string][]string{"node-a": {"openshift.io/p4rdma"}}
-	optedIn.cfg.Jobs.SRIOVRDMANADNamespace = "sriov-ns"
+	t.Run("isolation known: unattachable network is skipped", func(t *testing.T) {
+		c, out := pokprodLike(t, extra...)
+		c.resolveSRIOVRDMA(context.Background())
+		if got := plansOf(c)["openshift.io/p2rdma"]; got != operatorNS+"/roce-p2-shared" {
+			t.Fatalf("p2rdma network = %q, want the global one\n%s", got, out)
+		}
+	})
 
-	optedIn.resolveSRIOVRDMA(context.Background())
-	if len(optedIn.sriovRDMAPlans) != 1 {
-		t.Fatalf("expected opt-in to resolve the shared NAD, got %+v", optedIn.sriovRDMAPlans)
+	t.Run("isolation unknown: two candidates stay ambiguous", func(t *testing.T) {
+		c, out := pokprodLike(t, extra...)
+		c.client = fake.NewSimpleClientset() //nolint:staticcheck
+		c.resolveSRIOVRDMA(context.Background())
+		if _, ok := plansOf(c)["openshift.io/p2rdma"]; ok {
+			t.Fatalf("ambiguous pool must not be guessed: %v", plansOf(c))
+		}
+		if !strings.Contains(out.String(), "matches several networks") {
+			t.Errorf("ambiguity not reported:\n%s", out)
+		}
+	})
+}
+
+func TestResolveSRIOVRDMANamespacedNetwork(t *testing.T) {
+	// No networkNamespace: the operator renders the NAD next to the network CR.
+	extra := []*unstructured.Unstructured{
+		policy("p2-a", "node-a", "p2rdma", true, "eth"),
+		policy("p2-b", "node-b", "p2rdma", true, "eth"),
+		sriovNet("SriovNetwork", "team-a", "roce-p2", "p2rdma", ""),
+		nad("team-a", "roce-p2", "openshift.io/p2rdma"),
 	}
-	if got := optedIn.sriovRDMAPlans[0].network; got != "sriov-ns/roce-p4-shared" {
-		t.Errorf("cross-namespace reference = %q, want namespace-qualified", got)
+
+	t.Run("run namespace differs: denied by isolation", func(t *testing.T) {
+		c, out := pokprodLike(t, extra...)
+		c.resolveSRIOVRDMA(context.Background())
+		if _, ok := plansOf(c)["openshift.io/p2rdma"]; ok {
+			t.Fatalf("NAD in team-a must not be attached from %s", c.opts.Namespace)
+		}
+		if !strings.Contains(out.String(), "not attachable from namespace") {
+			t.Errorf("isolation reason not reported:\n%s", out)
+		}
+	})
+
+	t.Run("run namespace matches: referenced by name", func(t *testing.T) {
+		c, _ := pokprodLike(t, extra...)
+		c.opts.Namespace = "team-a"
+		c.resolveSRIOVRDMA(context.Background())
+		if got := plansOf(c)["openshift.io/p2rdma"]; got != "roce-p2" {
+			t.Fatalf("network ref = %q, want bare name in the run namespace", got)
+		}
+	})
+}
+
+func TestResolveSRIOVRDMASkipsPoolsNotUsableOnEveryNode(t *testing.T) {
+	tests := []struct {
+		name   string
+		extra  []*unstructured.Unstructured
+		tweak  func(c *Controller)
+		reason string
+	}{
+		{
+			name: "policies disagree on isRdma",
+			extra: []*unstructured.Unstructured{
+				policy("p2-a", "node-a", "p2rdma", true, "eth"),
+				policy("p2-a-plain", "node-a", "p2rdma", false, "eth"),
+				policy("p2-b", "node-b", "p2rdma", true, "eth"),
+				sriovNet("SriovNetwork", operatorNS, "roce-p2", "p2rdma", operatorNS),
+				nad(operatorNS, "roce-p2", "openshift.io/p2rdma"),
+			},
+			reason: "non-RDMA policies on node-a (p2-a-plain)",
+		},
+		{
+			name: "pool configured on one node only",
+			extra: []*unstructured.Unstructured{
+				policy("p2-a", "node-a", "p2rdma", true, "eth"),
+				sriovNet("SriovNetwork", operatorNS, "roce-p2", "p2rdma", operatorNS),
+				nad(operatorNS, "roce-p2", "openshift.io/p2rdma"),
+			},
+			reason: "not configured on node-b",
+		},
+		{
+			name: "policy applied but node advertises no VFs",
+			extra: []*unstructured.Unstructured{
+				policy("p2-a", "node-a", "p2rdma", true, "eth"),
+				policy("p2-b", "node-b", "p2rdma", true, "eth"),
+				sriovNet("SriovNetwork", operatorNS, "roce-p2", "p2rdma", operatorNS),
+				nad(operatorNS, "roce-p2", "openshift.io/p2rdma"),
+			},
+			tweak: func(c *Controller) {
+				c.gpuNodeInfo["node-b"].allocatable["openshift.io/p2rdma"] = *resource.NewQuantity(0, resource.DecimalSI)
+			},
+			reason: "no allocatable openshift.io/p2rdma on node-b",
+		},
+		{
+			name: "SriovNetwork exists but its NAD is missing",
+			extra: []*unstructured.Unstructured{
+				policy("p2-a", "node-a", "p2rdma", true, "eth"),
+				policy("p2-b", "node-b", "p2rdma", true, "eth"),
+				sriovNet("SriovNetwork", operatorNS, "roce-p2", "p2rdma", operatorNS),
+			},
+			reason: "NAD " + operatorNS + "/roce-p2 not readable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, out := pokprodLike(t, tt.extra...)
+			if tt.tweak != nil {
+				tt.tweak(c)
+			}
+			c.resolveSRIOVRDMA(context.Background())
+			if _, ok := plansOf(c)["openshift.io/p2rdma"]; ok {
+				t.Fatalf("p2rdma must be skipped: %v", plansOf(c))
+			}
+			if plansOf(c)["openshift.io/p6rdma"] == "" {
+				t.Errorf("the healthy p6 rail must still be attached: %v", plansOf(c))
+			}
+			if !strings.Contains(out.String(), tt.reason) {
+				t.Errorf("expected reason %q in:\n%s", tt.reason, out)
+			}
+		})
+	}
+}
+
+func TestResolveSRIOVRDMAInfiniBand(t *testing.T) {
+	setup := func(t *testing.T, networkKind string) (*Controller, *strings.Builder) {
+		c, _ := newTestController(fake.NewSimpleClientset()) //nolint:staticcheck
+		out := &strings.Builder{}
+		c.output = out
+		c.dynamic = newFakeDynamic(t,
+			policy("ib0-a", "node-a", "ib0rdma", true, "ib"),
+			sriovNet(networkKind, operatorNS, "ib0", "ib0rdma", operatorNS),
+			nad(operatorNS, "ib0", "openshift.io/ib0rdma"),
+		)
+		c.gpuNodes = []string{"node-a"}
+		c.gpuNodeInfo = map[string]nodeInfo{"node-a": sriovNode("node-a", map[string]int64{"openshift.io/ib0rdma": 8})}
+		return c, out
+	}
+
+	t.Run("SriovIBNetwork serves an IB pool", func(t *testing.T) {
+		c, out := setup(t, "SriovIBNetwork")
+		c.resolveSRIOVRDMA(context.Background())
+		if plansOf(c)["openshift.io/ib0rdma"] == "" {
+			t.Fatalf("IB rail not detected:\n%s", out)
+		}
+	})
+
+	t.Run("Ethernet SriovNetwork does not serve an IB pool", func(t *testing.T) {
+		c, out := setup(t, "SriovNetwork")
+		c.resolveSRIOVRDMA(context.Background())
+		if len(c.sriovRDMAPlans) != 0 {
+			t.Fatalf("kind mismatch must be skipped: %v", plansOf(c))
+		}
+		if !strings.Contains(out.String(), "does not match the pool's link type") {
+			t.Errorf("mismatch not reported:\n%s", out)
+		}
+	})
+}
+
+func TestResolveSRIOVRDMAMissingOrForbiddenCRDs(t *testing.T) {
+	t.Run("no SR-IOV operator: silent, no plans", func(t *testing.T) {
+		c, out := pokprodLike(t)
+		dyn := c.dynamic.(*dynamicfake.FakeDynamicClient)
+		dyn.PrependReactor("list", "sriovnetworknodepolicies", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewNotFound(sriovPolicyGVR.GroupResource(), "")
+		})
+		c.resolveSRIOVRDMA(context.Background())
+		if len(c.sriovRDMAPlans) != 0 || out.Len() != 0 {
+			t.Fatalf("expected silent skip, got plans %v output %q", plansOf(c), out)
+		}
+	})
+
+	t.Run("policies forbidden: points to manual config", func(t *testing.T) {
+		c, out := pokprodLike(t)
+		dyn := c.dynamic.(*dynamicfake.FakeDynamicClient)
+		dyn.PrependReactor("list", "sriovnetworknodepolicies", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(sriovPolicyGVR.GroupResource(), "", nil)
+		})
+		c.resolveSRIOVRDMA(context.Background())
+		if len(c.sriovRDMAPlans) != 0 || !strings.Contains(out.String(), "configure SR-IOV RDMA manually") {
+			t.Fatalf("expected manual-config hint, got plans %v output %q", plansOf(c), out)
+		}
+	})
+
+	t.Run("IB network CRD absent: Ethernet rails still work", func(t *testing.T) {
+		c, _ := pokprodLike(t)
+		dyn := c.dynamic.(*dynamicfake.FakeDynamicClient)
+		dyn.PrependReactor("list", "sriovibnetworks", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewNotFound(sriovIBNetworkGVR.GroupResource(), "")
+		})
+		c.resolveSRIOVRDMA(context.Background())
+		if plansOf(c)["openshift.io/p6rdma"] == "" {
+			t.Fatalf("missing IB CRD must not disable Ethernet detection: %v", plansOf(c))
+		}
+	})
+}
+
+func TestResolveSRIOVRDMAManualConfigWins(t *testing.T) {
+	for _, jobs := range []config.ResourceConfig{
+		{Requests: map[string]string{"rdma/ib": "1"}},
+		{Annotations: map[string]string{config.MultusNetworksAnnotation: "team/roce"}},
+	} {
+		c, out := pokprodLike(t)
+		c.resolveSRIOVRDMA(context.Background()) // detected first...
+		c.cfg.Jobs = jobs
+		c.resolveSRIOVRDMA(context.Background()) // ...then manual config appears
+		if c.sriovRDMAPlans != nil {
+			t.Fatalf("manual config %+v must clear auto-detected plans, got %v\n%s", jobs, plansOf(c), out)
+		}
 	}
 }
 

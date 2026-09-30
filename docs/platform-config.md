@@ -62,7 +62,7 @@ thresholds:
 | GPU resource for jobs | `nvidia.com/gpu` or `amd.com/gpu` (added to requests+limits) |
 | GPU-NIC topology | sysfs NUMA affinity |
 | OpenShift SCC | Auto-created when OCP detected |
-| SR-IOV RDMA rails | `openshift.io/*rdma` in `node.status.allocatable`, matched to a NetworkAttachmentDefinition (see below) |
+| SR-IOV RDMA rails | SR-IOV Network Operator CRs (`SriovNetworkNodePolicy`, `SriovNetwork`, `SriovIBNetwork`) plus node allocatable (see below) |
 
 ## What You Configure
 
@@ -73,7 +73,6 @@ thresholds:
 | Min driver version | `gpu.min_driver_version` | If your cluster needs a different minimum |
 | Bandwidth thresholds | `thresholds.*` | If defaults don't match your hardware |
 | Pod annotations | `agent.annotations`, `jobs.annotations` | If pods need special annotations |
-| SR-IOV NAD namespace | `jobs.sriov_rdma_nad_namespace` | Only if the NADs live outside the run namespace |
 
 ## SR-IOV RDMA (VF per pod)
 
@@ -85,37 +84,55 @@ until a Multus attachment gives it a netdev and an address. Requesting the
 resource without the attachment produces a device the RDMA checks correctly
 report as not RDMA-capable.
 
-Both halves are detected and injected together for `rdma-node` checks:
+When the SR-IOV Network Operator is installed, both halves are detected from its
+own objects and injected together for `rdma-node` checks:
 
 ```text
-openshift.io/p4rdma        (node allocatable)
-        +
-roce-p4                    (NAD annotated k8s.v1.cni.cncf.io/resourceName: openshift.io/p4rdma)
+SriovNetworkNodePolicy  isRdma: true, resourceName: p4rdma      which pools are RDMA
+SriovNetwork            resourceName: p4rdma → NAD roce-p4        which NAD serves the pool
+NAD annotation          k8s.v1.cni.cncf.io/resourceName: openshift.io/p4rdma   exact pod resource
+node allocatable        openshift.io/p4rdma > 0                  the pool really has VFs
 ```
 
 Rules:
 
-- Only rails advertised by **every** selected node are used. Nodes need not be
-  homogeneous; a rail present on some nodes would leave Jobs Pending on the rest.
-- NADs are looked up in the run namespace. Multus namespace isolation makes
-  cross-namespace attachment cluster-specific, so it is never inferred — opt in
-  explicitly:
+- A pool is used only if **every** selected node configures it and every
+  policy feeding it on that node is `isRdma: true` with `deviceType: netdevice`.
+  Nodes need not be homogeneous; a partial rail would leave Jobs Pending.
+- The NAD lives in the network's `spec.networkNamespace`, or next to the network
+  CR when that field is empty (namespaced SR-IOV). InfiniBand pools use
+  `SriovIBNetwork`; `OVSNetwork` is never used.
+- On OpenShift, a NAD outside the run namespace is used only if Multus allows it
+  (`openshift-multus/multus-daemon-config`: isolation off, or the namespace is in
+  `globalNamespaces`). If that ConfigMap cannot be read, the attach is attempted
+  and any Multus error is reported by the checker pod.
+- If more than one attachable network serves a pool, none is chosen.
+- Resource names are not interpreted: without readable SR-IOV CRDs there is no
+  auto-detection.
+- Setting the `k8s.v1.cni.cncf.io/networks` annotation, or any resource other
+  than cpu, memory, ephemeral storage, hugepages and GPUs, in `jobs` disables
+  auto-detection entirely. Configure `jobs.requests`, `jobs.limits`, and
+  `jobs.annotations` yourself to choose rails manually.
 
-  ```yaml
-  jobs:
-    sriov_rdma_nad_namespace: openshift-sriov-network-operator
-  ```
+Every skipped pool is printed with the reason, for example
+`SR-IOV RDMA: pool p2rdma has no allocatable openshift.io/p2rdma on node-b`.
 
-- If two NADs claim the same resource, neither is chosen; configure
-  `jobs.requests` and `jobs.annotations` yourself to disambiguate.
-- Setting an SR-IOV resource or the `k8s.v1.cni.cncf.io/networks` annotation in
-  `jobs` disables auto-detection entirely.
-
-Find the rails a node advertises:
+See what the validator will read:
 
 ```bash
-kubectl get nodes -o json | jq '.items[] | {name: .metadata.name,
-  rails: (.status.allocatable | to_entries | map(select(.key | startswith("openshift.io/")) | select(.key | endswith("rdma"))) | from_entries)}'
+kubectl get sriovnetworknodepolicies,sriovnetworks,sriovibnetworks -A
+```
+
+Configure rails manually (example):
+
+```yaml
+jobs:
+  requests:
+    openshift.io/p4rdma: "1"
+  limits:
+    openshift.io/p4rdma: "1"
+  annotations:
+    k8s.v1.cni.cncf.io/networks: openshift-sriov-network-operator/roce-p4-shared
 ```
 
 ### OpenShift (OCP) with NVIDIA Network Operator (RoCE)

@@ -86,7 +86,7 @@ func (c *Controller) detectAndCreateConfig(ctx context.Context) error {
 func (c *Controller) discoverGPUNodes(ctx context.Context) ([]string, error) {
 	c.gpuCounts = make(map[string]int64)
 	c.efaCounts = make(map[string]int64)
-	c.sriovRDMAResources = make(map[string][]string)
+	c.gpuNodeInfo = make(map[string]nodeInfo)
 
 	// Try label-based discovery first
 	for _, gs := range config.GPUNodeSelectors {
@@ -114,9 +114,7 @@ func (c *Controller) discoverGPUNodes(ctx context.Context) ([]string, error) {
 						c.efaCounts[node.Name] = efa
 					}
 				}
-				if sriov := config.SRIOVRDMAResourcesFromAllocatable(node.Status.Allocatable); len(sriov) > 0 {
-					c.sriovRDMAResources[node.Name] = sriov
-				}
+				c.gpuNodeInfo[node.Name] = nodeInfo{labels: node.Labels, allocatable: node.Status.Allocatable}
 			}
 			fmt.Fprintf(c.output, "  GPU vendor: %s (auto-detected from node labels)\n", gs.Vendor)
 			return c.filterNodes(names), nil
@@ -139,9 +137,7 @@ func (c *Controller) discoverGPUNodes(ctx context.Context) ([]string, error) {
 						c.efaCounts[node.Name] = efa
 					}
 				}
-				if sriov := config.SRIOVRDMAResourcesFromAllocatable(node.Status.Allocatable); len(sriov) > 0 {
-					c.sriovRDMAResources[node.Name] = sriov
-				}
+				c.gpuNodeInfo[node.Name] = nodeInfo{labels: node.Labels, allocatable: node.Status.Allocatable}
 				if c.gpuVendor == "" {
 					c.gpuVendor = config.GPUVendorFromResourceName(resName)
 					c.gpuResource = resName
