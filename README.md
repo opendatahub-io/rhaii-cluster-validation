@@ -134,7 +134,8 @@ kubectl rhaii-validate network          # TCP bandwidth + latency tests
 kubectl rhaii-validate rdma             # All RDMA checks + connectivity + bandwidth
 kubectl rhaii-validate all              # Everything (deps + gpu + network + rdma)
 kubectl rhaii-validate all --debug      # Keep pods alive for inspection
-kubectl rhaii-validate all -o json      # JSON output
+kubectl rhaii-validate all -o json      # JSON report on stdout; progress goes to stderr
+kubectl rhaii-validate all 2>/dev/null  # Report only, without progress lines
 kubectl rhaii-validate clean            # Cleanup
 ```
 

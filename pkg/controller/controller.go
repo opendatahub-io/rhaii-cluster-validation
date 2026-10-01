@@ -76,7 +76,8 @@ type Controller struct {
 	dynamic              dynamic.Interface
 	opts                 Options
 	cfg                  config.PlatformConfig
-	output               io.Writer
+	output               io.Writer // progress and warnings (stderr in the CLI)
+	result               io.Writer // final report only (stdout in the CLI)
 	platform             config.Platform
 	gpuVendor            config.GPUVendor    // auto-detected from node labels
 	gpuNodeLabel         string              // label used to discover GPU nodes (empty = fallback to resources)
@@ -116,8 +117,8 @@ func (c *Controller) Cleanup() error {
 	return nil
 }
 
-// New creates a new Controller.
-func New(opts Options, output io.Writer) (*Controller, error) {
+// New creates a Controller that writes progress to output and the final report to result.
+func New(opts Options, output, result io.Writer) (*Controller, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if opts.Kubeconfig != "" {
 		loadingRules.ExplicitPath = opts.Kubeconfig
@@ -154,6 +155,7 @@ func New(opts Options, output io.Writer) (*Controller, error) {
 		dynamic: dynamicClient,
 		opts:    opts,
 		output:  output,
+		result:  result,
 	}, nil
 }
 
