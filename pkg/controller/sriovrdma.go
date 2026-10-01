@@ -66,8 +66,8 @@ type sriovRDMAPlan struct {
 
 // rdmaPool is an SR-IOV resource pool that is RDMA-enabled on every selected node.
 type rdmaPool struct {
-	name       string // policy resourceName, without prefix
-	infiniband bool
+	name     string // policy resourceName, without prefix
+	linkType string // "ib", "eth", or "" when no policy declares one (linkType is optional)
 }
 
 // sriovNetworkRef is a SriovNetwork or SriovIBNetwork and the NAD the operator renders for it.
@@ -145,7 +145,7 @@ func (c *Controller) selectedNodeInfo() map[string]nodeInfo {
 type poolState struct {
 	rdma     bool // every contributing policy is RDMA-capable netdevice
 	anyRDMA  bool
-	ib       bool
+	ib, eth  bool // link types the policies declare explicitly
 	blockers []string
 }
 
@@ -185,6 +185,7 @@ func rdmaPoolsOnAllNodes(policies []unstructured.Unstructured, nodes map[string]
 				st.blockers = append(st.blockers, p.GetName())
 			}
 			st.ib = st.ib || strings.EqualFold(linkType, "ib")
+			st.eth = st.eth || strings.EqualFold(linkType, "eth")
 		}
 		perNode[node] = states
 	}
@@ -200,7 +201,7 @@ func rdmaPoolsOnAllNodes(policies []unstructured.Unstructured, nodes map[string]
 	var reasons []string
 	for _, pool := range slices.Sorted(maps.Keys(names)) {
 		var missing, conflicting []string
-		anyRDMA, ib := false, false
+		anyRDMA, ib, eth := false, false, false
 		for _, node := range slices.Sorted(maps.Keys(nodes)) {
 			st, ok := perNode[node][pool]
 			if !ok {
@@ -208,7 +209,7 @@ func rdmaPoolsOnAllNodes(policies []unstructured.Unstructured, nodes map[string]
 				continue
 			}
 			anyRDMA = anyRDMA || st.anyRDMA
-			ib = ib || st.ib
+			ib, eth = ib || st.ib, eth || st.eth
 			if !st.rdma {
 				conflicting = append(conflicting, fmt.Sprintf("%s (%s)", node, strings.Join(st.blockers, ", ")))
 			}
@@ -222,7 +223,14 @@ func rdmaPoolsOnAllNodes(policies []unstructured.Unstructured, nodes map[string]
 		case len(conflicting) > 0:
 			reasons = append(reasons, fmt.Sprintf("pool %s has non-RDMA policies on %s", pool, strings.Join(conflicting, "; ")))
 		default:
-			pools = append(pools, rdmaPool{name: pool, infiniband: ib})
+			linkType := ""
+			switch {
+			case ib && !eth:
+				linkType = "ib"
+			case eth && !ib:
+				linkType = "eth"
+			}
+			pools = append(pools, rdmaPool{name: pool, linkType: linkType})
 		}
 	}
 	return pools, reasons
@@ -279,7 +287,7 @@ func (c *Controller) planForPool(ctx context.Context, pool rdmaPool, networks []
 			continue
 		}
 		ref := n.targetNS + "/" + n.name
-		if n.infiniband != pool.infiniband {
+		if pool.linkType != "" && n.infiniband != (pool.linkType == "ib") {
 			why = append(why, fmt.Sprintf("%s %s/%s does not match the pool's link type", n.kind, n.namespace, n.name))
 			continue
 		}
@@ -385,9 +393,11 @@ func (c *Controller) sriovNotes(notes []string) {
 	}
 }
 
+// labelsMatch applies a policy nodeSelector the way the operator does: every key
+// must be present with an equal value, so an empty value does not match a missing label.
 func labelsMatch(selector, labels map[string]string) bool {
 	for k, v := range selector {
-		if labels[k] != v {
+		if lv, ok := labels[k]; !ok || lv != v {
 			return false
 		}
 	}
@@ -416,10 +426,16 @@ func (c *Controller) sriovNetworks() string {
 }
 
 // sriovNodeLayout is what one SriovNetworkNodeState says about planned rails:
-// which PFs carry each rail, and which PF each VF belongs to.
+// which PFs carry each rail, and which rail owns each VF.
 type sriovNodeLayout struct {
 	railPFs map[string][]string // rail resource -> PF PCI addresses
-	vfPF    map[string]string   // VF PCI address -> PF PCI address
+	vfRail  map[string]string   // VF PCI address -> rail resource
+}
+
+// vfGroupRange is the VF index range one rail owns on a PF (vfRange "start-end").
+type vfGroupRange struct {
+	rail       string
+	start, end int64
 }
 
 // sriovNodeLayouts reads SriovNetworkNodeStates for the selected nodes; nil when unreadable.
@@ -440,7 +456,8 @@ func (c *Controller) sriovNodeLayouts(ctx context.Context) map[string]sriovNodeL
 		if !slices.Contains(c.gpuNodes, s.GetName()) {
 			continue
 		}
-		l := sriovNodeLayout{railPFs: map[string][]string{}, vfPF: map[string]string{}}
+		l := sriovNodeLayout{railPFs: map[string][]string{}, vfRail: map[string]string{}}
+		ranges := map[string][]vfGroupRange{} // PF -> rails split by VF index
 		specIfaces, _, _ := unstructured.NestedSlice(s.Object, "spec", "interfaces")
 		for _, raw := range specIfaces {
 			iface, _ := raw.(map[string]any)
@@ -449,8 +466,18 @@ func (c *Controller) sriovNodeLayouts(ctx context.Context) map[string]sriovNodeL
 			for _, g := range groups {
 				group, _ := g.(map[string]any)
 				name, _ := group["resourceName"].(string)
-				if rail, ok := rails[name]; ok && !slices.Contains(l.railPFs[rail], pf) {
+				rail, ok := rails[name]
+				if !ok {
+					continue
+				}
+				if !slices.Contains(l.railPFs[rail], pf) {
 					l.railPFs[rail] = append(l.railPFs[rail], pf)
+				}
+				vfRange, _ := group["vfRange"].(string)
+				var r vfGroupRange
+				if _, err := fmt.Sscanf(vfRange, "%d-%d", &r.start, &r.end); err == nil {
+					r.rail = rail
+					ranges[pf] = append(ranges[pf], r)
 				}
 			}
 		}
@@ -461,8 +488,15 @@ func (c *Controller) sriovNodeLayouts(ctx context.Context) map[string]sriovNodeL
 			vfs, _ := iface["Vfs"].([]any) // the operator's status field is capitalized
 			for _, v := range vfs {
 				vf, _ := v.(map[string]any)
-				if addr, _ := vf["pciAddress"].(string); addr != "" {
-					l.vfPF[addr] = pf
+				addr, _ := vf["pciAddress"].(string)
+				id, found, _ := unstructured.NestedInt64(vf, "vfID")
+				if addr == "" || !found {
+					continue
+				}
+				for _, r := range ranges[pf] {
+					if id >= r.start && id <= r.end {
+						l.vfRail[addr] = r.rail
+					}
 				}
 			}
 		}
@@ -471,15 +505,9 @@ func (c *Controller) sriovNodeLayouts(ctx context.Context) map[string]sriovNodeL
 	return layouts
 }
 
-// railForVF returns the rail whose single PF owns the VF; multi-PF rails never match.
+// railForVF returns the rail whose vfRange contains this VF, or "" if none does.
 func (l sriovNodeLayout) railForVF(vf string) string {
-	pf := l.vfPF[vf]
-	for rail, pfs := range l.railPFs {
-		if pf != "" && len(pfs) == 1 && pfs[0] == pf {
-			return rail
-		}
-	}
-	return ""
+	return l.vfRail[vf]
 }
 
 // multiPFRails reports rails that span more than one PF on any node: a VF from

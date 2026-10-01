@@ -340,12 +340,12 @@ func TestResolveSRIOVRDMASkipsPoolsNotUsableOnEveryNode(t *testing.T) {
 }
 
 func TestResolveSRIOVRDMAInfiniBand(t *testing.T) {
-	setup := func(t *testing.T, networkKind string) (*Controller, *strings.Builder) {
+	setup := func(t *testing.T, networkKind, linkType string) (*Controller, *strings.Builder) {
 		c, _ := newTestController(fake.NewSimpleClientset()) //nolint:staticcheck
 		out := &strings.Builder{}
 		c.output = out
 		c.dynamic = newFakeDynamic(t,
-			policy("ib0-a", "node-a", "ib0rdma", true, "ib"),
+			policy("ib0-a", "node-a", "ib0rdma", true, linkType),
 			sriovNet(networkKind, operatorNS, "ib0", "ib0rdma", operatorNS),
 			nad(operatorNS, "ib0", "openshift.io/ib0rdma"),
 		)
@@ -355,7 +355,7 @@ func TestResolveSRIOVRDMAInfiniBand(t *testing.T) {
 	}
 
 	t.Run("SriovIBNetwork serves an IB pool", func(t *testing.T) {
-		c, out := setup(t, "SriovIBNetwork")
+		c, out := setup(t, "SriovIBNetwork", "ib")
 		c.resolveSRIOVRDMA(context.Background())
 		if plansOf(c)["openshift.io/ib0rdma"] == "" {
 			t.Fatalf("IB rail not detected:\n%s", out)
@@ -363,7 +363,7 @@ func TestResolveSRIOVRDMAInfiniBand(t *testing.T) {
 	})
 
 	t.Run("Ethernet SriovNetwork does not serve an IB pool", func(t *testing.T) {
-		c, out := setup(t, "SriovNetwork")
+		c, out := setup(t, "SriovNetwork", "ib")
 		c.resolveSRIOVRDMA(context.Background())
 		if len(c.sriovRDMAPlans) != 0 {
 			t.Fatalf("kind mismatch must be skipped: %v", plansOf(c))
@@ -372,6 +372,28 @@ func TestResolveSRIOVRDMAInfiniBand(t *testing.T) {
 			t.Errorf("mismatch not reported:\n%s", out)
 		}
 	})
+
+	// linkType is optional in the policy API: an IB PF selected by name keeps its link type.
+	t.Run("SriovIBNetwork serves a pool whose policy omits linkType", func(t *testing.T) {
+		c, out := setup(t, "SriovIBNetwork", "")
+		c.resolveSRIOVRDMA(context.Background())
+		if plansOf(c)["openshift.io/ib0rdma"] == "" {
+			t.Fatalf("omitted linkType must not be treated as Ethernet:\n%s", out)
+		}
+	})
+}
+
+func TestResolveSRIOVRDMAIgnoresPoliciesForLabelsTheNodeLacks(t *testing.T) {
+	// A non-RDMA storage policy sharing the pool name targets nodes labelled
+	// node-role.kubernetes.io/storage="". The GPU nodes lack that label, so the
+	// operator does not apply it to them and it must not veto their p6 rail.
+	storage := policy("p6-storage", "unused", "p6rdma", false, "eth")
+	storage.Object["spec"].(map[string]any)["nodeSelector"] = map[string]any{"node-role.kubernetes.io/storage": ""}
+	c, out := pokprodLike(t, storage)
+	c.resolveSRIOVRDMA(context.Background())
+	if plansOf(c)["openshift.io/p6rdma"] == "" {
+		t.Fatalf("p6 rail rejected by a policy that does not select these nodes:\n%s", out)
+	}
 }
 
 func TestResolveSRIOVRDMAMissingOrForbiddenCRDs(t *testing.T) {

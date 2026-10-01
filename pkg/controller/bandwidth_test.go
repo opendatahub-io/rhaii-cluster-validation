@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -226,19 +228,26 @@ func TestExpandRDMAJobs_EFA(t *testing.T) {
 	})
 }
 
+// nodeState mirrors a SriovNetworkNodeState: each PF's single group owns VFs 0-7, and
+// status lists the PF's VFs in vfID order.
 func nodeState(node string, pfRes map[string]string, pfVFs map[string][]string) *unstructured.Unstructured {
-	var specIfaces []any
+	groups := make(map[string][]any, len(pfRes))
 	for pf, res := range pfRes {
-		specIfaces = append(specIfaces, map[string]any{
-			"pciAddress": pf,
-			"vfGroups":   []any{map[string]any{"resourceName": res}},
-		})
+		groups[pf] = []any{map[string]any{"resourceName": res, "vfRange": "0-7"}}
+	}
+	return nodeStateGroups(node, groups, pfVFs)
+}
+
+func nodeStateGroups(node string, pfGroups map[string][]any, pfVFs map[string][]string) *unstructured.Unstructured {
+	var specIfaces []any
+	for pf, groups := range pfGroups {
+		specIfaces = append(specIfaces, map[string]any{"pciAddress": pf, "vfGroups": groups})
 	}
 	var statusIfaces []any
 	for pf, vfs := range pfVFs {
 		var vfObjs []any
-		for _, vf := range vfs {
-			vfObjs = append(vfObjs, map[string]any{"pciAddress": vf})
+		for id, vf := range vfs {
+			vfObjs = append(vfObjs, map[string]any{"pciAddress": vf, "vfID": int64(id)})
 		}
 		statusIfaces = append(statusIfaces, map[string]any{
 			"pciAddress": pf,
@@ -256,27 +265,23 @@ func nodeState(node string, pfRes map[string]string, pfVFs map[string][]string) 
 	return u
 }
 
-func TestExpandRDMAJobs_SRIOV(t *testing.T) {
-	nodeA := "node-a"
-	nodeB := "node-b"
-
-	pfRes := map[string]string{"0000:19:00.0": "p6rdma", "0000:29:00.0": "p8rdma"}
-	pfVFs := map[string][]string{"0000:19:00.0": {"0000:19:00.2"}, "0000:29:00.0": {"0000:29:00.2"}}
-
+// sriovBandwidthController seeds rail plans for p6/p8 (resolution itself is covered in
+// sriovrdma_test.go) and gives both nodes a topology whose NICs are the given VFs.
+func sriovBandwidthController(t *testing.T, states []*unstructured.Unstructured, nicPCIs ...string) (*Controller, map[string]*checks.NodeTopology) {
+	t.Helper()
 	c, _ := newTestController(nil)
 	cfg, err := config.GetConfig(config.PlatformOCP)
 	if err != nil {
 		t.Fatalf("GetConfig(OCP) error = %v", err)
 	}
 	c.cfg = cfg
-	c.gpuNodes = []string{nodeA, nodeB}
-	// Rail resolution is covered in sriovrdma_test.go; seed its result here.
+	c.gpuNodes = []string{"node-a", "node-b"}
 	c.sriovResolved = true
 	c.sriovRDMAPlans = []sriovRDMAPlan{
 		{resource: "openshift.io/p6rdma", network: operatorNS + "/roce-p6"},
 		{resource: "openshift.io/p8rdma", network: operatorNS + "/roce-p8"},
 	}
-	c.dynamic = newFakeDynamic(t, nodeState(nodeA, pfRes, pfVFs), nodeState(nodeB, pfRes, pfVFs))
+	c.dynamic = newFakeDynamic(t, states...)
 	base := rdma.NewRDMABandwidthJob(0, 0, nil)
 	base.PodCfg = &jobrunner.PodConfig{
 		ResourceRequests: map[string]string{"cpu": "500m"},
@@ -285,20 +290,28 @@ func TestExpandRDMAJobs_SRIOV(t *testing.T) {
 	}
 	c.AddJob(base)
 
-	// rdma-node saw its own VFs (19:00.2, 29:00.2); bandwidth pods will get different ones.
 	topo := func() *checks.NodeTopology {
-		nics := []checks.NICInfo{
-			{Dev: "mlx5_18", PCIAddr: "0000:19:00.2", LinkLayer: checks.LinkLayerEthernet},
-			{Dev: "mlx5_23", PCIAddr: "0000:29:00.2", LinkLayer: checks.LinkLayerEthernet},
+		topo := &checks.NodeTopology{GPUCount: len(nicPCIs), NICCount: len(nicPCIs)}
+		for i, pci := range nicPCIs {
+			nic := checks.NICInfo{Dev: fmt.Sprintf("mlx5_%d", 18+i), PCIAddr: pci, LinkLayer: checks.LinkLayerEthernet}
+			topo.NICList = append(topo.NICList, nic)
+			// Stored reports keep only the device name in pairs.
+			topo.Pairs = append(topo.Pairs, checks.GPUNICPair{GPU: checks.GPUInfo{ID: i}, NIC: checks.NICInfo{Dev: nic.Dev}})
 		}
-		return &checks.NodeTopology{GPUCount: 2, NICCount: 2, NICList: nics, Pairs: []checks.GPUNICPair{
-			{GPU: checks.GPUInfo{ID: 0}, NIC: checks.NICInfo{Dev: nics[0].Dev}}, // stored reports keep only the device name
-			{GPU: checks.GPUInfo{ID: 1}, NIC: checks.NICInfo{Dev: nics[1].Dev}},
-		}}
+		return topo
 	}
-	topoMap := map[string]*checks.NodeTopology{nodeA: topo(), nodeB: topo()}
+	return c, map[string]*checks.NodeTopology{"node-a": topo(), "node-b": topo()}
+}
 
-	jobs, skips := c.expandRDMAJobs(context.Background(), []string{nodeA, nodeB}, topoMap, nil)
+func TestExpandRDMAJobs_SRIOV(t *testing.T) {
+	nodeA := "node-a"
+	pfRes := map[string]string{"0000:19:00.0": "p6rdma", "0000:29:00.0": "p8rdma"}
+	pfVFs := map[string][]string{"0000:19:00.0": {"0000:19:00.2"}, "0000:29:00.0": {"0000:29:00.2"}}
+	c, topoMap := sriovBandwidthController(t,
+		[]*unstructured.Unstructured{nodeState("node-a", pfRes, pfVFs), nodeState("node-b", pfRes, pfVFs)},
+		"0000:19:00.2", "0000:29:00.2")
+
+	jobs, skips := c.expandRDMAJobs(context.Background(), []string{"node-a", "node-b"}, topoMap, nil)
 	if len(skips) != 0 {
 		t.Fatalf("unexpected skips: %#v", skips)
 	}
@@ -345,20 +358,84 @@ func TestExpandRDMAJobs_SRIOV(t *testing.T) {
 	}
 }
 
-func TestExpandRDMAJobs_MultiPFPoolWarning(t *testing.T) {
-	// One resource configured on two PFs on node-a: multi-PF warning must fire.
-	nodeA := "node-a"
-	nsA := nodeState(nodeA,
-		map[string]string{"0000:19:00.0": "p6rdma", "0000:20:00.0": "p6rdma"},
-		map[string][]string{"0000:19:00.0": {"0000:19:00.2"}},
-	)
-	c, _ := newTestController(nil)
-	c.gpuNodes = []string{nodeA}
-	c.sriovRDMAPlans = []sriovRDMAPlan{{resource: "openshift.io/p6rdma", network: "net"}}
-	c.dynamic = newFakeDynamic(t, nsA)
+func TestExpandRDMAJobs_SRIOVPoolsSplitOnePF(t *testing.T) {
+	// One PF split by vfRange: VFs 0-3 belong to p6rdma, 4-7 to p8rdma.
+	pf := "0000:19:00.0"
+	vfs := []string{"0000:19:00.2", "0000:19:00.3", "0000:19:00.4", "0000:19:00.5", "0000:19:00.6", "0000:19:00.7", "0000:19:01.0", "0000:19:01.1"}
+	groups := map[string][]any{pf: {
+		map[string]any{"resourceName": "p6rdma", "vfRange": "0-3"},
+		map[string]any{"resourceName": "p8rdma", "vfRange": "4-7"},
+	}}
+	states := []*unstructured.Unstructured{
+		nodeStateGroups("node-a", groups, map[string][]string{pf: vfs}),
+		nodeStateGroups("node-b", groups, map[string][]string{pf: vfs}),
+	}
+	// Map iteration order is random, so a wrong lookup shows up across repeated runs.
+	for range 20 {
+		c, topoMap := sriovBandwidthController(t, states, vfs[1], vfs[5]) // vfID 1 and vfID 5
+		jobs, _ := c.expandRDMAJobs(context.Background(), []string{"node-a", "node-b"}, topoMap, nil)
+		var rails []string
+		for _, j := range jobs {
+			if pd, ok := j.(*rdma.RDMABandwidthJob); ok {
+				rails = append(rails, pd.Rail)
+			}
+		}
+		if !slices.Equal(rails, []string{"openshift.io/p6rdma", "openshift.io/p8rdma"}) {
+			t.Fatalf("PD rails = %v, want [p6rdma p8rdma] from each VF's vfRange", rails)
+		}
+	}
+}
 
-	multi := multiPFRails(c.sriovNodeLayouts(context.Background()))
-	if len(multi) != 1 || multi["openshift.io/p6rdma"] == "" {
-		t.Errorf("expected multi-PF warning for p6rdma, got: %#v", multi)
+func TestExpandRDMAJobs_SRIOVUnmappedLanesAreSkippedNotRunOnStaleDevices(t *testing.T) {
+	pfVFs := map[string][]string{"0000:19:00.0": {"0000:19:00.2"}, "0000:29:00.0": {"0000:29:00.2"}}
+	tests := []struct {
+		name   string
+		states []*unstructured.Unstructured
+		reason string
+	}{
+		{
+			name: "pool spans two PFs",
+			states: []*unstructured.Unstructured{
+				nodeState("node-a", map[string]string{"0000:19:00.0": "p6rdma", "0000:29:00.0": "p6rdma"}, pfVFs),
+				nodeState("node-b", map[string]string{"0000:19:00.0": "p6rdma", "0000:29:00.0": "p6rdma"}, pfVFs),
+			},
+			reason: "spans 2 PFs",
+		},
+		{
+			name:   "no SriovNetworkNodeState",
+			reason: "SriovNetworkNodeState",
+		},
+		{
+			name: "VF not owned by a detected rail",
+			states: []*unstructured.Unstructured{
+				nodeState("node-a", map[string]string{"0000:19:00.0": "p6rdma", "0000:29:00.0": "storage"}, pfVFs),
+				nodeState("node-b", map[string]string{"0000:19:00.0": "p6rdma", "0000:29:00.0": "storage"}, pfVFs),
+			},
+			reason: "0000:29:00.2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, topoMap := sriovBandwidthController(t, tt.states, "0000:19:00.2", "0000:29:00.2")
+			jobs, skips := c.expandRDMAJobs(context.Background(), []string{"node-a", "node-b"}, topoMap, nil)
+			for _, j := range jobs {
+				if pd, ok := j.(*rdma.RDMABandwidthJob); ok && pd.Rail == "" {
+					t.Errorf("job %s would run on rdma-node's device %s without a VF", pd.Name(), pd.Device)
+				}
+				if _, ok := j.(*rdma.RDMAWEPJob); ok {
+					t.Errorf("WEP must not run when a lane has no rail")
+				}
+			}
+			var text []string
+			for _, s := range skips {
+				if s.Status != checks.StatusSkip {
+					t.Errorf("skip %s has status %s", s.JobName, s.Status)
+				}
+				text = append(text, s.JobName+": "+s.Message)
+			}
+			if !strings.Contains(strings.Join(text, "\n"), tt.reason) {
+				t.Errorf("skips must explain %q, got:\n%s", tt.reason, strings.Join(text, "\n"))
+			}
+		})
 	}
 }

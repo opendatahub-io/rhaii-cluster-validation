@@ -137,16 +137,25 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 			origPodCfg.ResourceRequests[string(c.gpuResource)] = gpuCountStr
 			origPodCfg.ResourceLimits[string(c.gpuResource)] = gpuCountStr
 		}
-		// SR-IOV: map each NIC to its rail so pods get their own VF on it.
+		// SR-IOV: map each NIC to its rail so pods get their own VF on it. In auto
+		// mode an unmapped lane is skipped: rdma-node's device does not exist in a new pod.
 		if !c.sriovResolved {
 			c.resolveSRIOVRDMA(ctx)
 		}
-		layouts := c.sriovNodeLayouts(ctx)
-		if multi := multiPFRails(layouts); len(multi) > 0 {
-			for _, rail := range slices.Sorted(maps.Keys(multi)) {
-				fmt.Fprintf(c.output, "  SR-IOV RDMA: %s; skipping bandwidth auto-config. Set jobs.requests and jobs.annotations manually\n", multi[rail])
+		autoSRIOV := len(c.sriovRDMAPlans) > 0
+		var layouts map[string]sriovNodeLayout
+		noRail := "" // why no lane can be mapped, when that applies to every lane
+		if autoSRIOV {
+			layouts = c.sriovNodeLayouts(ctx)
+			if multi := multiPFRails(layouts); len(multi) > 0 {
+				var msgs []string
+				for _, rail := range slices.Sorted(maps.Keys(multi)) {
+					msgs = append(msgs, multi[rail])
+				}
+				noRail = strings.Join(msgs, "; ") + ", so a VF cannot be tied to one GPU. Set jobs.requests and jobs.annotations manually"
+			} else if _, ok := layouts[topoNode]; !ok {
+				noRail = "no readable SriovNetworkNodeState for " + topoNode
 			}
-			layouts = nil
 		}
 		// Pairs loaded from a stored report carry only the device name; NICList keeps the PCI address.
 		refLayout := layouts[topoNode]
@@ -160,6 +169,7 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 		var wepRails []string
 		var gpuIDs []int
 		uniqueDevices := make(map[string]bool)
+		wepIncomplete := false
 
 		cfgQPs := c.cfg.Jobs.RDMA.QPs
 		cfgMsgSize := c.cfg.Jobs.RDMA.MessageSize
@@ -178,7 +188,26 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 				rdmaJob.MessageSize = cfgMsgSize
 			}
 
-			if rail := refLayout.railForVF(nicPCI[pair.NIC.Dev]); rail != "" {
+			if autoSRIOV {
+				pci := nicPCI[pair.NIC.Dev]
+				rail := ""
+				if noRail == "" {
+					rail = refLayout.railForVF(pci)
+				}
+				if rail == "" {
+					why := noRail
+					if why == "" {
+						why = fmt.Sprintf("VF %s on %s is not in any detected rail's vfRange", pci, topoNode)
+					}
+					skipResults = append(skipResults, jobrunner.JobResult{
+						JobName: rdmaJob.Name(),
+						Status:  checks.StatusSkip,
+						Message: fmt.Sprintf("RDMA bandwidth skipped: no SR-IOV rail for GPU%d's NIC %s: %s", pair.GPU.ID, pair.NIC.Dev, why),
+					})
+					fmt.Fprintf(c.output, "  RDMA PD job skipped: GPU%d ↔ %s has no SR-IOV rail\n", pair.GPU.ID, pair.NIC.Dev)
+					wepIncomplete = true
+					continue
+				}
 				rdmaJob.Rail = rail
 				c.attachSRIOVRails(rdmaJob.PodCfg, []string{rail})
 			}
@@ -195,6 +224,15 @@ func (c *Controller) expandRDMAJobs(ctx context.Context, gpuNodes []string, topo
 				gpuIDs = append(gpuIDs, pair.GPU.ID)
 				uniqueDevices[pair.NIC.Dev] = true
 			}
+		}
+
+		if wepIncomplete {
+			skipResults = append(skipResults, jobrunner.JobResult{
+				JobName: "ib-write-bw-wep",
+				Status:  checks.StatusSkip,
+				Message: "RDMA WEP bandwidth skipped: not every GPU's NIC maps to an SR-IOV rail (see the per-GPU skips)",
+			})
+			continue
 		}
 
 		// Add WEP job if multiple NICs available.

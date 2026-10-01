@@ -1,6 +1,8 @@
 package rdma
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -45,19 +47,26 @@ func NewRDMABandwidthJob(pass, warn float64, podCfg *jobrunner.PodConfig) *RDMAB
 	}
 }
 
+// Name is also the rhaii-job-type label value, so it stays within the 63-character
+// label limit: a rail uses its pool name, and anything longer gets a stable hash suffix.
 func (j *RDMABandwidthJob) Name() string {
 	label := j.Device
 	if j.Rail != "" {
-		label = j.Rail
+		label = j.Rail[strings.LastIndex(j.Rail, "/")+1:]
 	}
-	if label != "" {
-		clean := strings.NewReplacer("_", "-", ".", "-", "/", "-").Replace(label)
-		if j.UseCUDA >= 0 {
-			return fmt.Sprintf("ib-bw-gpu%d-%s", j.UseCUDA, clean)
-		}
-		return fmt.Sprintf("ib-bw-%s", clean)
+	if label == "" {
+		return "ib-write-bw"
 	}
-	return "ib-write-bw"
+	clean := strings.NewReplacer("_", "-", ".", "-").Replace(label)
+	name := "ib-bw-" + clean
+	if j.UseCUDA >= 0 {
+		name = fmt.Sprintf("ib-bw-gpu%d-%s", j.UseCUDA, clean)
+	}
+	if len(name) <= 63 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	return strings.TrimRight(name[:56], "-.") + "-" + hex.EncodeToString(sum[:3])
 }
 
 func (j *RDMABandwidthJob) SetPodConfig(cfg *jobrunner.PodConfig) {

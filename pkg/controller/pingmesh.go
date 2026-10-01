@@ -60,12 +60,8 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 		}
 		for _, p := range c.sriovRDMAPlans {
 			rails = append(rails, p.resource)
-			rdmaCfg.ResourceRequests[p.resource] = "1"
-			rdmaCfg.ResourceLimits[p.resource] = "1"
 		}
-		if len(rails) > 0 {
-			rdmaCfg.Annotations[config.MultusNetworksAnnotation] = c.sriovNetworks()
-		}
+		c.attachSRIOVRails(rdmaCfg, rails)
 	}
 
 	// Build job map for all N-choose-2 pairs
