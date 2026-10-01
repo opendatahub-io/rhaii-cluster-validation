@@ -20,6 +20,7 @@ type RDMAWEPJob struct {
 	ServerImage   string
 	ClientImage   string
 	Devices       []string // all NIC devices (e.g., ["mlx5_0", "mlx5_1", ..., "mlx5_7"])
+	Rails         []string // SR-IOV resources, 1:1 with Devices; resolves each NIC at runtime
 	GPUIDs        []int    // matching GPU IDs for --use_cuda
 	QPs           int      // number of queue pairs per NIC (default 4)
 	MessageSize   int      // message size in bytes (default 1048576 = 1 MiB)
@@ -101,52 +102,66 @@ func (j *RDMAWEPJob) ibArgs() string {
 
 func (j *RDMAWEPJob) serverScript() []string {
 	base := j.ibArgs()
-	var cmds []string
+	var sb strings.Builder
+	sb.WriteString("#!/bin/bash\n")
+	if len(j.Rails) > 0 {
+		sb.WriteString(resolveDevFunc() + "\n")
+	}
 	for i, dev := range j.Devices {
-		if !checks.ValidDeviceName.MatchString(dev) {
+		port := 18515 + i
+		devRef := dev
+		if i < len(j.Rails) && j.Rails[i] != "" {
+			devVar := fmt.Sprintf("d%d", i)
+			fmt.Fprintf(&sb, "%s=$(resolve_dev %s)\n", devVar, railEnvKey(j.Rails[i]))
+			devRef = "$" + devVar
+		} else if !checks.ValidDeviceName.MatchString(dev) {
 			continue
 		}
-		port := 18515 + i
-		cmd := fmt.Sprintf("ib_write_bw %s -d %s -p %d", base, dev, port)
+		cuda := ""
 		if i < len(j.GPUIDs) && j.GPUIDs[i] >= 0 {
-			cmd += fmt.Sprintf(" --use_cuda %d", j.GPUIDs[i])
+			cuda = fmt.Sprintf(" --use_cuda %d", j.GPUIDs[i])
 		}
-		cmd += " &"
-		cmds = append(cmds, cmd)
+		fmt.Fprintf(&sb, "[ -n \"%s\" ] && ib_write_bw %s -d %s -p %d%s &\n", devRef, base, devRef, port, cuda)
 	}
-	cmds = append(cmds, "wait")
-	script := strings.Join(cmds, "\n")
-	return []string{"bash", "-c", script}
+	sb.WriteString("wait\n")
+	return []string{"bash", "-c", sb.String()}
 }
 
 func (j *RDMAWEPJob) clientScript(serverIP string) []string {
 	base := j.ibArgs()
-	var cmds []string
-	cmds = append(cmds, "mkdir -p /tmp/wep")
+	var sb strings.Builder
+	sb.WriteString("#!/bin/bash\nmkdir -p /tmp/wep\n")
+	if len(j.Rails) > 0 {
+		sb.WriteString(resolveDevFunc() + "\n")
+	}
 	for i, dev := range j.Devices {
-		if !checks.ValidDeviceName.MatchString(dev) {
-			continue
-		}
 		port := 18515 + i
-		cmd := fmt.Sprintf("ib_write_bw %s -d %s -p %d %s", base, dev, port, serverIP)
-		if i < len(j.GPUIDs) && j.GPUIDs[i] >= 0 {
-			cmd += fmt.Sprintf(" --use_cuda %d", j.GPUIDs[i])
-		}
-		cmd += fmt.Sprintf(" > /tmp/wep/nic%d.txt 2>&1 &", i)
-		cmds = append(cmds, cmd)
-	}
-	cmds = append(cmds, "wait")
-	// Output all results so ParseResult can sum them
-	cmds = append(cmds, "echo '=== WEP RESULTS ==='")
-	for i, dev := range j.Devices {
-		if !checks.ValidDeviceName.MatchString(dev) {
+		devRef := dev
+		if i < len(j.Rails) && j.Rails[i] != "" {
+			devVar := fmt.Sprintf("d%d", i)
+			fmt.Fprintf(&sb, "%s=$(resolve_dev %s)\n", devVar, railEnvKey(j.Rails[i]))
+			devRef = "$" + devVar
+		} else if !checks.ValidDeviceName.MatchString(dev) {
 			continue
 		}
-		cmds = append(cmds, fmt.Sprintf("echo '--- NIC %d: %s ---'", i, dev))
-		cmds = append(cmds, fmt.Sprintf("cat /tmp/wep/nic%d.txt", i))
+		cuda := ""
+		if i < len(j.GPUIDs) && j.GPUIDs[i] >= 0 {
+			cuda = fmt.Sprintf(" --use_cuda %d", j.GPUIDs[i])
+		}
+		fmt.Fprintf(&sb, "if [ -n \"%s\" ]; then\n  ib_write_bw %s -d %s -p %d%s %s > /tmp/wep/nic%d.txt 2>&1 &\nelse\n  echo 'no device' > /tmp/wep/nic%d.txt\nfi\n",
+			devRef, base, devRef, port, cuda, serverIP, i, i)
 	}
-	script := strings.Join(cmds, "\n")
-	return []string{"bash", "-c", script}
+	sb.WriteString("wait\necho '=== WEP RESULTS ==='\n")
+	for i, dev := range j.Devices {
+		label := dev
+		if i < len(j.Rails) && j.Rails[i] != "" {
+			label = j.Rails[i]
+		} else if !checks.ValidDeviceName.MatchString(dev) {
+			continue
+		}
+		fmt.Fprintf(&sb, "echo '--- NIC %d: %s ---'\ncat /tmp/wep/nic%d.txt\n", i, label, i)
+	}
+	return []string{"bash", "-c", sb.String()}
 }
 
 func (j *RDMAWEPJob) ServerSpec(node, namespace, image string) (*batchv1.Job, error) {
