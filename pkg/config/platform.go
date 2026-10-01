@@ -122,6 +122,9 @@ func (c PlatformConfig) Validate() error {
 	if c.Thresholds.RDMABandwidthWEP.Pass <= c.Thresholds.RDMABandwidthWEP.Warn {
 		return fmt.Errorf("invalid rdma_bandwidth_wep_gbps thresholds: pass (%.1f) must be > warn (%.1f)", c.Thresholds.RDMABandwidthWEP.Pass, c.Thresholds.RDMABandwidthWEP.Warn)
 	}
+	if c.Thresholds.NVLinkBusBW.Pass <= c.Thresholds.NVLinkBusBW.Warn {
+		return fmt.Errorf("invalid nccl_nvlink_busbw_gbytes thresholds: pass (%.1f) must be > warn (%.1f)", c.Thresholds.NVLinkBusBW.Pass, c.Thresholds.NVLinkBusBW.Warn)
+	}
 
 	// Validate latency thresholds (lower is better: Pass < Warn)
 	if c.Thresholds.TCPLatency.Pass >= c.Thresholds.TCPLatency.Warn {
@@ -153,6 +156,10 @@ type ThresholdConfig struct {
 	TCPLatency       LatencyThreshold   `yaml:"tcp_latency_ms" json:"tcp_latency_ms"`
 	RDMABandwidthPD  BandwidthThreshold `yaml:"rdma_bandwidth_pd_gbps" json:"rdma_bandwidth_pd_gbps"`
 	RDMABandwidthWEP BandwidthThreshold `yaml:"rdma_bandwidth_wep_gbps" json:"rdma_bandwidth_wep_gbps"`
+	// NVLinkBusBW is the intra-node NCCL all-reduce peak bus bandwidth threshold.
+	// NOTE: unit is GB/s (gigabytes/sec, as reported by nccl-tests "busbw"), not
+	// gigabits like the *_gbps thresholds above.
+	NVLinkBusBW BandwidthThreshold `yaml:"nccl_nvlink_busbw_gbytes" json:"nccl_nvlink_busbw_gbytes"`
 }
 
 // BandwidthThreshold defines pass/warn thresholds for bandwidth (higher is better).
