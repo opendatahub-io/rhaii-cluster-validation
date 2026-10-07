@@ -3,8 +3,10 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks/rdma"
@@ -149,6 +151,44 @@ func TestFormatTable_ReturnsTrueOnFailure(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "NOT READY") {
 		t.Errorf("expected NOT READY status line, got:\n%s", buf.String())
+	}
+}
+
+func TestFormatTable_WrapsFullMessagesInsideTheMessageColumn(t *testing.T) {
+	var ports []string
+	for i := range 40 {
+		ports = append(ports, fmt.Sprintf("mlx5_%d/port1", i))
+	}
+	long := "40/62 RDMA NIC(s) down: " + strings.Join(ports, ", ")
+	multi := "job failed: server pod failed: WARNING: BW peak won't be measured in this run.\n Port number 1 state is Down\n Couldn't set the link layer"
+	r := Build("ocp", "", []checks.Result{
+		{Category: "networking_rdma", Name: "rdma_nic_status", Node: "node-a", Status: checks.StatusWarn, Message: long},
+		{Category: "networking_rdma", Name: "rdma_nic_status", Node: "node-b", Status: checks.StatusFail, Message: multi},
+	}, nil, nil, nil)
+
+	var buf bytes.Buffer
+	FormatTable(&buf, "ocp", r, "")
+	out := buf.String()
+
+	for _, want := range append(ports, "Port number 1 state is Down", "Couldn't set the link layer") {
+		if !strings.Contains(out, want) {
+			t.Errorf("table lost %q:\n%s", want, out)
+		}
+	}
+	lines := strings.Split(out, "\n")
+	msgCol := -1
+	for _, line := range lines {
+		if strings.HasPrefix(line, "GROUP") {
+			msgCol = strings.Index(line, "MESSAGE")
+		}
+	}
+	for _, line := range lines {
+		if utf8.RuneCountInString(line) > msgCol+messageWidth {
+			t.Errorf("line is %d runes, want at most %d:\n%s", utf8.RuneCountInString(line), msgCol+messageWidth, line)
+		}
+		if strings.HasPrefix(line, "  ") && strings.TrimSpace(line) != "" && len(line)-len(strings.TrimLeft(line, " ")) != msgCol {
+			t.Errorf("continuation line must start under MESSAGE (column %d):\n%q", msgCol, line)
+		}
 	}
 }
 

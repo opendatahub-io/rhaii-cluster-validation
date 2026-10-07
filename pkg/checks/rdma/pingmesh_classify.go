@@ -88,7 +88,8 @@ func ClassifyPingMeshResults(
 		clientRails := BuildRailMap(clientTopo)
 
 		// Merge results across retry attempts: a NIC pair passes if it succeeded in any attempt
-		type nicPairKey struct{ src, dst string }
+		// Key by rail when results carry one: SR-IOV device names differ per pod.
+		type nicPairKey struct{ src, dst, srcRail, dstRail string }
 		bestResult := make(map[nicPairKey]bool)
 		lastError := make(map[nicPairKey]string)
 		lastAttempt := make(map[nicPairKey]int)
@@ -100,6 +101,9 @@ func ClassifyPingMeshResults(
 			}
 			for _, r := range results {
 				k := nicPairKey{src: r.SrcDev, dst: r.DstDev}
+				if r.SrcRail != "" && r.DstRail != "" {
+					k = nicPairKey{srcRail: r.SrcRail, dstRail: r.DstRail}
+				}
 				if r.Pass {
 					bestResult[k] = true
 				}
@@ -120,6 +124,9 @@ func ClassifyPingMeshResults(
 			dstRail, dstOk := serverRails[k.dst]
 
 			isRail := srcOk && dstOk && srcRail == dstRail
+			if k.srcRail != "" {
+				isRail = k.srcRail == k.dstRail
+			}
 			cat := PingMeshCategoryXRail
 			if isRail {
 				cat = PingMeshCategoryRail
@@ -149,6 +156,8 @@ func ClassifyPingMeshResults(
 					NodeB:    pair.Client,
 					SrcDev:   k.src,
 					DstDev:   k.dst,
+					SrcRail:  k.srcRail,
+					DstRail:  k.dstRail,
 					Category: cat,
 					Error:    lastError[k],
 					Attempt:  lastAttempt[k],
