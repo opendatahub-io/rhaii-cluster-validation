@@ -246,6 +246,14 @@ func TestValidate_ThresholdSemantics(t *testing.T) {
 			},
 			wantError: true,
 		},
+		{
+			name: "invalid nvlink busbw: pass <= warn",
+			modify: func(c *PlatformConfig) {
+				c.Thresholds.NVLinkBusBW.Pass = 150.0
+				c.Thresholds.NVLinkBusBW.Warn = 300.0
+			},
+			wantError: true,
+		},
 	}
 
 	for _, tt := range tests {

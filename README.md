@@ -7,6 +7,7 @@ Runs preflight checks on GPU clusters before deploying inference workloads. Vali
 **What it checks:**
 
 - GPU driver version and ECC memory errors
+- Single-node NVLink health on **GB200 NVL4 only** (NCCL all-reduce across local GPUs; SKIPs on other hardware)
 - GPU-NIC NUMA topology (which GPU is closest to which NIC)
 - RDMA device presence and NIC link status
 - TCP bandwidth (iperf3) and latency between node pairs
@@ -182,6 +183,42 @@ Each row = one GPU. If error count > 0, that GPU has memory corruption.
 PASS: `No uncorrectable ECC errors on 2 GPU(s)`
 FAIL: `Uncorrectable ECC errors found: GPU 1: 3 uncorrectable errors`
 Remediation: Replace GPU or contact cloud provider
+
+### GPU NVLink (NCCL all-reduce) — GB200 NVL4 only
+
+> **Scope:** This is a **single-node (intra-node) test for GB200 NVL4 systems
+> only.** It detects the GPU model via `nvidia-smi -L` and SKIPs on any
+> non-GB200 hardware — the thresholds and expected bus-bandwidth ceiling are
+> specific to GB200 NVL4.
+
+Verifies the single-node GPU interconnect (NVLink) on a GB200 NVL4 node by
+running an NCCL all-reduce across all local GPUs and checking both correctness
+and achieved bus bandwidth — the same `all_reduce_perf` benchmark used to
+validate NVLink on GB200 NVL4:
+
+```
+all_reduce_perf -b 8 -e 1G -f 2 -g <num_gpus>
+```
+
+The check inspects two things:
+
+- **Correctness** — every `#wrong` column must be 0 and the run must end with
+  `# Out of bounds values : 0 OK`. Nonzero values mean the interconnect is
+  corrupting data.
+- **Peak bus bandwidth** (`busbw`, in GB/s) against
+  `thresholds.nccl_nvlink_busbw_gbytes` (default pass 300 / warn 150). This
+  separates a real NVLink path (hundreds of GB/s) from a PCIe fallback or
+  degraded fabric (tens of GB/s).
+
+PASS: `NVLink healthy: peak busbw 605.9 GB/s across 4 GPUs (threshold 300 GB/s), no data errors`
+WARN: `NVLink bus bandwidth low: peak busbw 200.0 GB/s (below 300 GB/s pass threshold)`
+FAIL: `NVLink bus bandwidth very low: peak busbw 45.0 GB/s (below 150 GB/s warn threshold) — likely PCIe fallback or degraded NVLink`
+Remediation: Check `nvidia-smi topo -m` (expect NV# links, not PHB/SYS), NVLink lane status (`nvidia-smi nvlink -s`), and fabric manager
+
+> **Note:** requires `all_reduce_perf` (nccl-tests) on PATH. The validator image
+> does not yet ship it, so this check reports SKIP until run from an
+> NCCL-capable image; it then activates automatically. It also SKIPs on any
+> node that is not a GB200 NVL4 system.
 
 ### GPU-NIC Topology
 
