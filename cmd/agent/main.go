@@ -388,6 +388,7 @@ func newRunCmd() *cobra.Command {
 				default:
 					r.AddCheck(gpu.NewDriverCheck(nodeName, cfg.GPU.MinDriverVersion))
 					r.AddCheck(gpu.NewECCCheck(nodeName))
+					r.AddCheck(gpu.NewNVLinkCheck(nodeName, cfg.Thresholds.NVLinkBusBW.Pass, cfg.Thresholds.NVLinkBusBW.Warn))
 				}
 			}
 
