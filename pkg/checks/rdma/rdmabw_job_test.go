@@ -8,7 +8,9 @@ import (
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/jobrunner"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 func TestParseIBWriteBW(t *testing.T) {
@@ -224,5 +226,33 @@ MB/sec: 25000
 	}
 	if failed.Status != checks.StatusFail {
 		t.Errorf("ParseResult(failed lane) status = %s, want FAIL", failed.Status)
+	}
+}
+
+func TestRDMABandwidthJobLabelsStayValidForLongRailNames(t *testing.T) {
+	// SR-IOV pool names may be up to 63 characters; the job name becomes a label value.
+	long := "openshift.io/" + strings.Repeat("p", 50)
+	names := map[string]bool{}
+	for _, rail := range []string{long + "a", long + "b"} {
+		j := NewRDMABandwidthJob(0, 0, &jobrunner.PodConfig{})
+		j.Rail, j.UseCUDA = rail, 3
+		for _, spec := range []func() (*batchv1.Job, error){
+			func() (*batchv1.Job, error) { return j.ServerSpec("node-a", "ns", "img") },
+			func() (*batchv1.Job, error) { return j.ClientSpec("node-b", "ns", "img", "10.0.0.1") },
+		} {
+			job, err := spec()
+			if err != nil {
+				t.Fatalf("spec error: %v", err)
+			}
+			for k, v := range job.Spec.Template.Labels {
+				if errs := validation.IsValidLabelValue(v); len(errs) > 0 {
+					t.Errorf("label %s=%q is invalid: %v", k, v, errs)
+				}
+			}
+		}
+		names[j.Name()] = true
+	}
+	if len(names) != 2 {
+		t.Errorf("distinct rails must keep distinct job names, got %v", names)
 	}
 }

@@ -22,6 +22,13 @@ import (
 // intra-host loopback ib_write_bw tests for every GPU-NIC combination.
 // All Jobs are created before returning so they run in parallel across nodes.
 func (c *Controller) deployLoopbackBWProbeJobs(ctx context.Context, netReports []checks.NodeReport) error {
+	// The probe reuses rdma-node's device names; SR-IOV pods get different VFs, so
+	// keep the NUMA-affinity pairing (reported as WARN) instead of measuring the wrong NIC.
+	if len(c.sriovRDMAPlans) > 0 {
+		fmt.Fprintln(c.output, "  Skipping BW probe: SR-IOV RDMA rails auto-attached, device names differ per pod")
+		c.bwProbeMaxMatrixSize = 0
+		return nil
+	}
 	topoMap := rdma.BuildTopologyMap(netReports)
 
 	var maxMatrixSize int
