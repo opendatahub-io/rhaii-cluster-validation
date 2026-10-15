@@ -134,3 +134,15 @@ func TestExtractBundleVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestLWSCRDIsOptional(t *testing.T) {
+	for _, spec := range RequiredCRDs {
+		if spec.Name == "leaderworkersets.leaderworkerset.x-k8s.io" {
+			if !spec.Optional {
+				t.Errorf("LWS CRD should be Optional in RequiredCRDs")
+			}
+			return
+		}
+	}
+	t.Fatal("LWS CRD not found in RequiredCRDs")
+}
