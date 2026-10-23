@@ -1,6 +1,8 @@
 package rdma
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,6 +28,7 @@ type RDMABandwidthJob struct {
 	ServerImage   string               // optional custom server image (empty = use default)
 	ClientImage   string               // optional custom client image (empty = use default)
 	Device        string               // RDMA device (e.g., "mlx5_0"), empty = auto
+	Rail          string               // SR-IOV resource name (e.g. openshift.io/p6rdma); resolves device at runtime
 	UseCUDA       int                  // GPU ID for GPUDirect RDMA (-1 = disabled)
 	QPs           int                  // number of queue pairs (default 4)
 	MessageSize   int                  // message size in bytes (default 1048576 = 1 MiB)
@@ -44,15 +47,26 @@ func NewRDMABandwidthJob(pass, warn float64, podCfg *jobrunner.PodConfig) *RDMAB
 	}
 }
 
+// Name is also the rhaii-job-type label value, so it stays within the 63-character
+// label limit: a rail uses its pool name, and anything longer gets a stable hash suffix.
 func (j *RDMABandwidthJob) Name() string {
-	if j.Device != "" {
-		dev := strings.ReplaceAll(j.Device, "_", "-")
-		if j.UseCUDA >= 0 {
-			return fmt.Sprintf("ib-bw-gpu%d-%s", j.UseCUDA, dev)
-		}
-		return fmt.Sprintf("ib-bw-%s", dev)
+	label := j.Device
+	if j.Rail != "" {
+		label = j.Rail[strings.LastIndex(j.Rail, "/")+1:]
 	}
-	return "ib-write-bw"
+	if label == "" {
+		return "ib-write-bw"
+	}
+	clean := strings.NewReplacer("_", "-", ".", "-").Replace(label)
+	name := "ib-bw-" + clean
+	if j.UseCUDA >= 0 {
+		name = fmt.Sprintf("ib-bw-gpu%d-%s", j.UseCUDA, clean)
+	}
+	if len(name) <= 63 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	return strings.TrimRight(name[:56], "-.") + "-" + hex.EncodeToString(sum[:3])
 }
 
 func (j *RDMABandwidthJob) SetPodConfig(cfg *jobrunner.PodConfig) {
@@ -100,7 +114,7 @@ func (j *RDMABandwidthJob) buildArgs() []string {
 	if j.MessageSize > 0 {
 		args = append(args, "--size", fmt.Sprintf("%d", j.MessageSize))
 	}
-	if j.Device != "" && checks.ValidDeviceName.MatchString(j.Device) {
+	if j.Rail == "" && j.Device != "" && checks.ValidDeviceName.MatchString(j.Device) {
 		args = append(args, "-d", j.Device)
 	}
 	if j.UseCUDA >= 0 {
@@ -110,14 +124,22 @@ func (j *RDMABandwidthJob) buildArgs() []string {
 }
 
 func (j *RDMABandwidthJob) ServerSpec(node, namespace, image string) (*batchv1.Job, error) {
-	return jobrunner.BuildJobSpec(j.Name(), node, namespace, image, jobrunner.RoleServer, j.PodCfg,
-		j.buildArgs())
+	return jobrunner.BuildJobSpec(j.Name(), node, namespace, image, jobrunner.RoleServer, j.PodCfg, j.command())
 }
 
 func (j *RDMABandwidthJob) ClientSpec(node, namespace, image, serverIP string) (*batchv1.Job, error) {
-	args := append(j.buildArgs(), serverIP)
-	return jobrunner.BuildJobSpec(j.Name(), node, namespace, image, jobrunner.RoleClient, j.PodCfg,
-		args)
+	return jobrunner.BuildJobSpec(j.Name(), node, namespace, image, jobrunner.RoleClient, j.PodCfg, j.command(serverIP))
+}
+
+// command runs ib_write_bw directly, or in rail mode first resolves the pod's own VF for -d.
+func (j *RDMABandwidthJob) command(extra ...string) []string {
+	if j.Rail == "" {
+		return append(j.buildArgs(), extra...)
+	}
+	return []string{"bash", "-c", resolveDevFunc() + "\n" +
+		fmt.Sprintf("dev=$(resolve_dev %s)\n", railEnvKey(j.Rail)) +
+		fmt.Sprintf("[ -z \"$dev\" ] && { echo 'no RDMA device for %s in this pod' >&2; exit 1; }\n", j.Rail) +
+		"exec " + strings.Join(append(j.buildArgs(), `-d "$dev"`), " ") + " " + strings.Join(extra, " ")}
 }
 
 func (j *RDMABandwidthJob) ParseResult(logs string) (*jobrunner.JobResult, error) {

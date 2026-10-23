@@ -47,8 +47,9 @@ func NewCommand() *cobra.Command {
             ctx := cmd.Context()
 
             // Controller handles: discover GPU nodes → deploy per-node Jobs →
-            // wait → collect pod logs → cleanup → print report
-            ctrl, err := controller.New(opts, os.Stdout)
+            // wait → collect pod logs → cleanup → print report.
+            // Progress goes to stderr, the report to stdout.
+            ctrl, err := controller.New(opts, os.Stderr, os.Stdout)
             if err != nil {
                 return err
             }
