@@ -44,6 +44,10 @@ type CRDSpec struct {
 	ReleaseVersionJSONPath string
 	// Minimum required release version (semver, e.g. "v1.4.0"). Empty = report only, don't enforce.
 	MinReleaseVersion string
+	// Optional marks the CRD as not strictly required: when it is not installed
+	// the check reports WARN instead of FAIL, so a cluster is not marked NOT
+	// READY on its account.
+	Optional bool
 }
 
 // RequiredCRDs lists the CRDs required for llm-d deployment (design doc §5.2).
@@ -72,6 +76,7 @@ var RequiredCRDs = []CRDSpec{
 		Name:        "leaderworkersets.leaderworkerset.x-k8s.io",
 		Description: "LeaderWorkerSet",
 		Remediation: "Install LeaderWorkerSet: https://github.com/kubernetes-sigs/lws#installation",
+		Optional:    true,
 	},
 	{
 		Name:        "certificates.cert-manager.io",
@@ -170,7 +175,11 @@ func (c *Checker) checkCRD(ctx context.Context, spec CRDSpec) checks.Result {
 	raw, foundName, err := c.fetchCRD(ctx, spec)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			r.Status = checks.StatusFail
+			if spec.Optional {
+				r.Status = checks.StatusWarn
+			} else {
+				r.Status = checks.StatusFail
+			}
 			r.Message = fmt.Sprintf("%s: not installed", spec.Description)
 			r.Remediation = spec.Remediation
 			return r

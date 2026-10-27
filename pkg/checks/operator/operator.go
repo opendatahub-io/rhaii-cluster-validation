@@ -23,6 +23,10 @@ type OperatorSpec struct {
 	Namespaces []string
 	// Remediation hint shown when the operator is not found
 	Remediation string
+	// Optional marks the operator as not strictly required: when it is missing
+	// or unhealthy the check reports WARN instead of FAIL, so a cluster is not
+	// marked NOT READY on its account.
+	Optional bool
 }
 
 // RequiredOperators lists the operators required for llm-d deployment.
@@ -47,6 +51,7 @@ var RequiredOperators = []OperatorSpec{
 		Description: "LeaderWorkerSet operator",
 		Namespaces:  []string{"openshift-lws-operator"},
 		Remediation: "Install LeaderWorkerSet: https://github.com/kubernetes-sigs/lws#installation",
+		Optional:    true,
 	},
 }
 
@@ -124,14 +129,14 @@ func (c *Checker) checkOperator(ctx context.Context, spec OperatorSpec) checks.R
 	}
 
 	if !anyNamespaceFound {
-		r.Status = checks.StatusFail
+		r.Status = missingStatus(spec)
 		r.Message = fmt.Sprintf("%s: not installed (checked namespaces: %s)", spec.Description, strings.Join(spec.Namespaces, ", "))
 		r.Remediation = spec.Remediation
 		return r
 	}
 
 	if totalFailed > 0 {
-		r.Status = checks.StatusFail
+		r.Status = missingStatus(spec)
 		r.Message = fmt.Sprintf("%s: %d pod(s) failing in %s", spec.Description, totalFailed, strings.Join(checkedNamespaces, ", "))
 		return r
 	}
@@ -142,10 +147,20 @@ func (c *Checker) checkOperator(ctx context.Context, spec OperatorSpec) checks.R
 		return r
 	}
 
-	r.Status = checks.StatusFail
+	r.Status = missingStatus(spec)
 	r.Message = fmt.Sprintf("%s: namespace(s) exist but no running pods found in %s", spec.Description, strings.Join(checkedNamespaces, ", "))
 	r.Remediation = spec.Remediation
 	return r
+}
+
+// missingStatus returns WARN for optional operators and FAIL otherwise, so an
+// optional operator that is missing or unhealthy never marks the cluster as
+// NOT READY.
+func missingStatus(spec OperatorSpec) checks.Status {
+	if spec.Optional {
+		return checks.StatusWarn
+	}
+	return checks.StatusFail
 }
 
 func isFailed(pod corev1.Pod) bool {
