@@ -52,6 +52,18 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 
 	toolsImage := c.opts.ToolsImage
 
+	// SR-IOV: pods request one VF per detected rail and resolve their own device names.
+	var rails []string
+	if rdmaType != config.RDMATypeSRD {
+		if !c.sriovResolved {
+			c.resolveSRIOVRDMA(ctx)
+		}
+		for _, p := range c.sriovRDMAPlans {
+			rails = append(rails, p.resource)
+		}
+		c.attachSRIOVRails(rdmaCfg, rails)
+	}
+
 	// Build job map for all N-choose-2 pairs
 	jobMap := make(map[jobrunner.NodePair]jobrunner.Job)
 	for i := 0; i < len(gpuNodes); i++ {
@@ -84,6 +96,7 @@ func (c *Controller) runPingMesh(ctx context.Context, gpuNodes []string, netRepo
 			}
 			pair := jobrunner.NodePair{Server: serverNode, Client: clientNode}
 			pmJob := rdma.NewPingMeshJob(serverNode, clientNode, serverDevs, clientDevs, rdmaType, gidIndex, iterations, timeout)
+			pmJob.Rails = rails
 			if err := pmJob.ValidateDevices(); err != nil {
 				fmt.Fprintf(c.output, "  Warning: %v for %s↔%s, skipping pair\n", err, serverNode, clientNode)
 				continue
