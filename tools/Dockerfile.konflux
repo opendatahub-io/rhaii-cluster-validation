@@ -1,6 +1,6 @@
 # CUDA base image (UBI9-based, includes CUDA devel + runtime, sha-pinned)
 # All component versions pinned to match AWS EFA installer 1.46.0 / llm-d v0.8.1
-ARG AIPCC_BASE_IMAGE=registry.redhat.io/rhai/base-image-cuda-13.0-rhel9@sha256:e29b922fee43fd4b2396768b206c280fb91482a9b141ae9dfcfafa09b7462287
+ARG AIPCC_BASE_IMAGE=registry.redhat.io/rhai/base-image-cuda13.0-torch2.13-rhel9:1793124388@sha256:8e457469fa7dad4a2b5d7c2b39f0d0409855dd7d881c07ca51f1170b5f04dfca
 FROM ${AIPCC_BASE_IMAGE} AS builder
 
 # Needed with aipcc image
