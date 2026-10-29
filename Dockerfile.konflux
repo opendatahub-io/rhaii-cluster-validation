@@ -11,7 +11,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=1 GOOS=linux GOEXPERIMENT=strictfipsruntime go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o /opt/app-root/rhaii-validator ./cmd/agent/
 
 # Runtime stage
-FROM registry.access.redhat.com/ubi9/ubi@sha256:48393e4261b2544f652c915b3e052256ddf66ee95cd04dc0362191f302c4e94a
+FROM registry.access.redhat.com/ubi9/ubi@sha256:5f08e80aa970ae77712e75e5e857ac0b396abc900823c4d041c1150a9538a13f
 
 LABEL name="rhoai/odh-rhaii-cluster-validator-rhel9" \
       com.redhat.component="odh-rhaii-cluster-validator-rhel9" \
