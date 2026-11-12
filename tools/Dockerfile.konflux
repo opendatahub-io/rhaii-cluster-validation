@@ -85,7 +85,7 @@ RUN test -f /tmp/perftest/autogen.sh || \
     make install DESTDIR=/opt/perftest
 
 # Runtime stage — vanilla UBI9, all RDMA libs copied from builder
-FROM registry.redhat.io/ubi9/ubi@sha256:48393e4261b2544f652c915b3e052256ddf66ee95cd04dc0362191f302c4e94a
+FROM registry.redhat.io/ubi9/ubi@sha256:1e9f0ed9fceafb40878bc1705ff124aa150e3fed873f18c42cdc2dded319e0a8
 
 USER root
 WORKDIR /root
