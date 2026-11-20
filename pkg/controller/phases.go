@@ -44,6 +44,7 @@ func (c *Controller) runGPUCheckPhase(ctx context.Context) ([]checks.NodeReport,
 // warnings so the run can still produce a (partial) report.
 func (c *Controller) runRDMANodeCheckPhase(ctx context.Context) ([]checks.NodeReport, error) {
 	fmt.Fprintln(c.output, "[Step 7] Deploying per-node RDMA node check Jobs...")
+	c.resolveSRIOVRDMA(ctx)
 	if err := c.deployNodeCheckJobs(ctx, nodeCheckJobSpec{
 		kind:        "RDMA node check",
 		namePrefix:  "rhaii-validate-net-",

@@ -249,7 +249,7 @@ Operators:
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
-			ctrl, err := controller.New(opts, os.Stdout)
+			ctrl, err := controller.New(opts, os.Stderr, os.Stdout)
 			if err != nil {
 				return err
 			}
@@ -283,7 +283,7 @@ func runDeploy(opts controller.Options, setup func(*controller.Controller)) erro
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	ctrl, err := controller.New(opts, os.Stdout)
+	ctrl, err := controller.New(opts, os.Stderr, os.Stdout)
 	if err != nil {
 		return err
 	}
@@ -323,7 +323,7 @@ func newCleanCmd() *cobra.Command {
 				Namespace:  namespace,
 				Image:      "unused",
 			}
-			ctrl, err := controller.New(opts, os.Stdout)
+			ctrl, err := controller.New(opts, os.Stderr, os.Stdout)
 			if err != nil {
 				return err
 			}

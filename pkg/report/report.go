@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks/rdma"
@@ -131,49 +132,36 @@ func FormatTable(w io.Writer, platform string, r Report, storedHint string) bool
 
 	fmt.Fprintln(w)
 
-	fmt.Fprintf(w, "%-20s %-30s %-35s %-8s %s\n", "GROUP", "CHECK", "NODE", "STATUS", "MESSAGE")
-	fmt.Fprintln(w, strings.Repeat("-", 130))
-
-	for _, res := range r.ClusterChecks {
-		fmt.Fprintf(w, "%-20s %-30s %-35s %-8s %s\n",
-			res.Category, res.Name, "(cluster)", res.Status, res.Message)
-		if res.Remediation != "" {
-			fmt.Fprintf(w, "%-20s %-30s %-35s %-8s Fix: %s\n", "", "", "", "", res.Remediation)
+	rows := [][]string{{"GROUP", "CHECK", "NODE", "STATUS", "MESSAGE"}}
+	add := func(group, name, node string, status checks.Status, msg, fix string) {
+		if node == "" {
+			node = "-"
+		}
+		rows = append(rows, []string{group, name, node, string(status), msg})
+		if fix != "" {
+			rows = append(rows, []string{"", "", "", "", "Fix: " + fix})
 		}
 	}
-
+	for _, res := range r.ClusterChecks {
+		add(res.Category, res.Name, "(cluster)", res.Status, res.Message, res.Remediation)
+	}
 	for _, report := range r.Nodes {
 		for _, res := range report.Results {
-			node := res.Node
-			if node == "" {
-				node = "-"
-			}
-			fmt.Fprintf(w, "%-20s %-30s %-35s %-8s %s\n",
-				res.Category, res.Name, node, res.Status, res.Message)
-			if res.Remediation != "" {
-				fmt.Fprintf(w, "%-20s %-30s %-35s %-8s Fix: %s\n", "", "", "", "", res.Remediation)
-			}
+			add(res.Category, res.Name, res.Node, res.Status, res.Message, res.Remediation)
 		}
 	}
-
 	// Pingmesh connectivity results (between per-node checks and bandwidth)
 	if r.Pingmesh != nil {
 		for _, name := range []string{"rdma_conn_rail", "rdma_conn_xrail"} {
 			if s, ok := r.Pingmesh.Summary[name]; ok {
-				fmt.Fprintf(w, "%-20s %-30s %-35s %-8s %s\n",
-					"networking_rdma", name, "(cluster)", s.Status, s.Message)
+				add("networking_rdma", name, "(cluster)", s.Status, s.Message, "")
 			}
 		}
 	}
-
 	for _, jr := range r.JobResults {
-		node := jr.Node
-		if node == "" {
-			node = "-"
-		}
-		fmt.Fprintf(w, "%-20s %-30s %-35s %-8s %s\n",
-			"bandwidth", jr.JobName, node, jr.Status, jr.Message)
+		add("bandwidth", jr.JobName, jr.Node, jr.Status, jr.Message, "")
 	}
+	writeTable(w, rows)
 
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Summary: %d PASS | %d WARN | %d FAIL | %d SKIP\n", r.Summary["pass"], r.Summary["warn"], r.Summary["fail"], r.Summary["skip"])
@@ -202,4 +190,71 @@ func FormatJSON(w io.Writer, r Report) bool {
 	data, _ := json.MarshalIndent(r, "", "  ")
 	fmt.Fprintln(w, string(data))
 	return r.Summary["fail"] > 0
+}
+
+// messageWidth is where long messages wrap; every character is still printed.
+const messageWidth = 100
+
+// writeTable sizes the first columns to their content and wraps the last column,
+// printing continuation lines under it so the columns stay aligned.
+func writeTable(w io.Writer, rows [][]string) {
+	widths := make([]int, len(rows[0])-1)
+	for _, row := range rows {
+		for i := range widths {
+			widths[i] = max(widths[i], utf8.RuneCountInString(row[i]))
+		}
+	}
+	indent := 0
+	for _, width := range widths {
+		indent += width + 2
+	}
+	for n, row := range rows {
+		var sb strings.Builder
+		for i, width := range widths {
+			fmt.Fprintf(&sb, "%-*s  ", width, row[i])
+		}
+		for j, part := range wrap(row[len(row)-1], messageWidth) {
+			if j > 0 {
+				sb.Reset()
+				sb.WriteString(strings.Repeat(" ", indent))
+			}
+			fmt.Fprintln(w, strings.TrimRight(sb.String()+part, " "))
+		}
+		if n == 0 {
+			fmt.Fprintln(w, strings.Repeat("-", indent+messageWidth))
+		}
+	}
+}
+
+// wrap splits s into lines of at most width runes, breaking at spaces where it can.
+// Every line of s is kept; only blank lines are dropped.
+func wrap(s string, width int) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		cur := ""
+		for _, word := range strings.Fields(line) {
+			for utf8.RuneCountInString(word) > width {
+				if cur != "" {
+					out, cur = append(out, cur), ""
+				}
+				r := []rune(word)
+				out, word = append(out, string(r[:width])), string(r[width:])
+			}
+			switch {
+			case cur == "":
+				cur = word
+			case utf8.RuneCountInString(cur)+1+utf8.RuneCountInString(word) > width:
+				out, cur = append(out, cur), word
+			default:
+				cur += " " + word
+			}
+		}
+		if cur != "" {
+			out = append(out, cur)
+		}
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	return out
 }

@@ -86,14 +86,18 @@ func (c *Controller) deployNodeCheckJobs(ctx context.Context, spec nodeCheckJobS
 		if spec.checkMode == CheckModeRDMANode {
 			efaCount = c.applyAutoEFA(container, nodeName)
 		}
+		if job.Spec.Template.Annotations == nil {
+			job.Spec.Template.Annotations = make(map[string]string)
+		}
 
-		if len(spec.resourceCfg.Annotations) > 0 {
-			if job.Spec.Template.Annotations == nil {
-				job.Spec.Template.Annotations = make(map[string]string)
-			}
-			for k, v := range spec.resourceCfg.Annotations {
-				job.Spec.Template.Annotations[k] = v
-			}
+		var sriovResources []string
+		if spec.checkMode == CheckModeRDMANode {
+			sriovResources = c.applySRIOVRDMA(container, job.Spec.Template.Annotations)
+		}
+
+		// User-supplied annotations win over anything auto-detection injected.
+		for k, v := range spec.resourceCfg.Annotations {
+			job.Spec.Template.Annotations[k] = v
 		}
 
 		container.Env = append(container.Env,
@@ -111,6 +115,10 @@ func (c *Controller) deployNodeCheckJobs(ctx context.Context, spec nodeCheckJobS
 		if efaCount > 0 {
 			msg = fmt.Sprintf("  Created %s job %s (node: %s, GPUs: %d, EFA: %d, RDMA_TYPE: %s)\n",
 				spec.kind, jobName, nodeName, gpuCount, efaCount, rdmaType)
+		}
+		if len(sriovResources) > 0 {
+			msg = fmt.Sprintf("  Created %s job %s (node: %s, GPUs: %d, SR-IOV RDMA: %s)\n",
+				spec.kind, jobName, nodeName, gpuCount, strings.Join(sriovResources, ", "))
 		}
 		fmt.Fprint(c.output, msg)
 	}

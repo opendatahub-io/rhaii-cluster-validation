@@ -112,9 +112,9 @@ Common flags: `--debug` (keep pods alive for `kubectl exec`/logs), `-o json`, `-
 - `run` subcommand is hidden and internal — only used by per-node Job pods
 - Agent JSON report goes to stdout, progress to stderr — container runtimes merge both in `kubectl logs`, so the controller skips lines until it finds `{`
 - RDMA bandwidth jobs are expanded per GPU-NIC pair from topology (not one job per node); WEP job added if 2+ unique NICs
-- Pingmesh uses N-choose-2 pairwise scheduling with round-robin tournament and 3 controller-managed retries; rail vs xrail classification based on pair position index in each node's topology
+- Pingmesh uses N-choose-2 pairwise scheduling with round-robin tournament and 3 controller-managed retries; rail vs xrail classification by SR-IOV resource name when pods resolve their own VFs, otherwise by pair position index in each node's topology
 - GPU vendor is always auto-detected (never configured)
-- RDMA resource (e.g., `rdma/ib`, `nvidia.com/roce`) must be manually configured in platform config
+- SR-IOV RDMA rails are auto-detected from SR-IOV operator CRs; other RDMA resources (e.g., `rdma/ib`, `nvidia.com/roce`) must be manually configured in platform config
 
 ## Known Limitations
 

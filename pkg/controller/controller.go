@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -72,15 +73,20 @@ type Options struct {
 // Controller orchestrates check job deployment, result collection, and cleanup.
 type Controller struct {
 	client               kubernetes.Interface
+	dynamic              dynamic.Interface
 	opts                 Options
 	cfg                  config.PlatformConfig
-	output               io.Writer
+	output               io.Writer // progress and warnings (stderr in the CLI)
+	result               io.Writer // final report only (stdout in the CLI)
 	platform             config.Platform
 	gpuVendor            config.GPUVendor    // auto-detected from node labels
 	gpuNodeLabel         string              // label used to discover GPU nodes (empty = fallback to resources)
 	gpuNodes             []string            // discovered GPU node names
 	gpuCounts            map[string]int64    // GPU count per node (from allocatable)
 	efaCounts            map[string]int64    // EFA count per node on EKS (from allocatable)
+	gpuNodeInfo          map[string]nodeInfo // labels + allocatable per GPU node (SR-IOV discovery)
+	sriovRDMAPlans       []sriovRDMAPlan     // resolved resource + Multus attachment for RDMA node checks
+	sriovResolved        bool                // resolveSRIOVRDMA ran this session
 	gpuResource          corev1.ResourceName // e.g. "nvidia.com/gpu" or "amd.com/gpu"
 	jobs                 []jobrunner.Job
 	clusterResults       []checks.Result      // Tier 1 (API) check results (CRDs, etc.)
@@ -111,8 +117,8 @@ func (c *Controller) Cleanup() error {
 	return nil
 }
 
-// New creates a new Controller.
-func New(opts Options, output io.Writer) (*Controller, error) {
+// New creates a Controller that writes progress to output and the final report to result.
+func New(opts Options, output, result io.Writer) (*Controller, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if opts.Kubeconfig != "" {
 		loadingRules.ExplicitPath = opts.Kubeconfig
@@ -130,6 +136,13 @@ func New(opts Options, output io.Writer) (*Controller, error) {
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
+	// Used only to read NetworkAttachmentDefinitions for SR-IOV RDMA
+	// auto-detection; a cluster without Multus simply has none to list.
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
 	if opts.Namespace == "" {
 		opts.Namespace = "rhaii-validation"
 	}
@@ -138,9 +151,11 @@ func New(opts Options, output io.Writer) (*Controller, error) {
 	}
 
 	return &Controller{
-		client: client,
-		opts:   opts,
-		output: output,
+		client:  client,
+		dynamic: dynamicClient,
+		opts:    opts,
+		output:  output,
+		result:  result,
 	}, nil
 }
 

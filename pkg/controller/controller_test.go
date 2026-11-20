@@ -25,6 +25,7 @@ func newTestController(client kubernetes.Interface) (*Controller, *bytes.Buffer)
 		client: client,
 		opts:   Options{Namespace: "test-ns", Timeout: defaultTimeout},
 		output: &buf,
+		result: &buf,
 	}, &buf
 }
 

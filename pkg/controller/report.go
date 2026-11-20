@@ -74,10 +74,10 @@ func (c *Controller) printReport(reports []checks.NodeReport, jobResults []jobru
 		storedHint = fmt.Sprintf("kubectl get cm %s -n %s -o jsonpath='{.data.report\\.json}' | jq .", reportCMName, c.opts.Namespace)
 	}
 
-	return report.FormatTable(c.output, string(c.platform), r, storedHint)
+	return report.FormatTable(c.result, string(c.platform), r, storedHint)
 }
 
 func (c *Controller) printJSONReport(reports []checks.NodeReport, jobResults []jobrunner.JobResult) bool {
 	r := report.Build(string(c.platform), "", c.clusterResults, reports, jobResults, c.pingmeshReport)
-	return report.FormatJSON(c.output, r)
+	return report.FormatJSON(c.result, r)
 }

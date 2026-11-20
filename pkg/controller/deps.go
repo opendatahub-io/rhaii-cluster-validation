@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks"
 	"github.com/opendatahub-io/rhaii-cluster-validation/pkg/checks/crd"
@@ -26,11 +25,7 @@ func (c *Controller) RunOperatorChecks(ctx context.Context) []checks.Result {
 // RunDeps runs Tier 1 dependency checks (CRDs + operator health) and prints the report.
 // This is a lightweight path that doesn't create any cluster resources.
 func (c *Controller) RunDeps(ctx context.Context) error {
-	// Use stderr for progress so JSON mode stays machine-parseable on stdout
 	log := c.output
-	if c.opts.OutputFormat == "json" {
-		log = io.Discard
-	}
 
 	fmt.Fprintln(log, "=== RHAII Dependency Checks ===")
 	fmt.Fprintln(log)

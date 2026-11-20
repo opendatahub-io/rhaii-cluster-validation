@@ -34,6 +34,9 @@ type PingMeshJob struct {
 	PodCfg        *jobrunner.PodConfig
 	ServerImage   string
 	ClientImage   string
+	// Rails are SR-IOV resources both pods request, e.g. openshift.io/p6rdma. When set,
+	// each pod finds its own VF per rail at runtime and ServerDevices/ClientDevices are unused.
+	Rails []string
 }
 
 func NewPingMeshJob(serverNode, clientNode string, serverDevs, clientDevs []string, rdmaType config.RDMAType, gidIndex, iterations, timeout int) *PingMeshJob {
@@ -58,6 +61,9 @@ func NewPingMeshJob(serverNode, clientNode string, serverDevs, clientDevs []stri
 // ValidateDevices returns an error when no valid RDMA devices remain after
 // NewPingMeshJob filters invalid names.
 func (j *PingMeshJob) ValidateDevices() error {
+	if len(j.Rails) > 0 {
+		return nil
+	}
 	if len(j.ServerDevices) == 0 {
 		return fmt.Errorf("pingmesh: no valid server RDMA devices")
 	}
@@ -150,8 +156,29 @@ func bashQuotedArray(name string, devs []string) string {
 }
 
 func (j *PingMeshJob) serverTimeout() int {
-	tests := len(j.ServerDevices) * len(j.ClientDevices)
+	tests := len(j.endpoints(j.ServerDevices)) * len(j.endpoints(j.ClientDevices))
 	return tests*j.Timeout + defaultServerBufSec
+}
+
+// railEnvKey is the env var the SR-IOV device plugin sets for a resource:
+// openshift.io/p6rdma -> PCIDEVICE_OPENSHIFT_IO_P6RDMA (plus an _INFO JSON twin).
+func railEnvKey(resource string) string {
+	return "PCIDEVICE_" + strings.ToUpper(strings.NewReplacer(".", "_", "/", "_").Replace(resource))
+}
+
+// resolveDevFunc prints the pod's own RDMA device for one rail, or nothing when
+// it cannot pick exactly one (a VF name differs per pod, so it is never baked in).
+func resolveDevFunc() string {
+	return `resolve_dev() {
+  local d="" info pci
+  info=$(printenv "$1_INFO")
+  [ -n "$info" ] && d=$(printf %s "$info" | jq -r '[.[] | .rdma.rdma_dev // empty] | if length == 1 then .[0] else "" end' 2>/dev/null)
+  if [ -z "$d" ]; then
+    pci=$(printenv "$1")
+    case "$pci" in ""|*,*) ;; *) d=$(ls "/sys/bus/pci/devices/$pci/infiniband" 2>/dev/null) ;; esac
+  fi
+  case "$d" in ""|*[!A-Za-z0-9_-]*) echo "" ;; *) echo "$d" ;; esac
+}`
 }
 
 // gidDiscoveryFunc returns the bash function for RoCEv2 GID auto-discovery.
@@ -219,24 +246,50 @@ func (j *PingMeshJob) clientScript(serverIP string) []string {
 	return j.ibvClientScript(serverIP)
 }
 
+// pingEndpoint is one side of a probe: a fixed device name, or a rail whose device
+// the pod resolves at runtime.
+type pingEndpoint struct {
+	dev  string // shell expression for the device
+	rail string
+}
+
+func (j *PingMeshJob) endpoints(devs []string) []pingEndpoint {
+	var eps []pingEndpoint
+	if len(j.Rails) > 0 {
+		for _, r := range j.Rails {
+			eps = append(eps, pingEndpoint{dev: "$(resolve_dev " + railEnvKey(r) + ")", rail: r})
+		}
+		return eps
+	}
+	for _, d := range devs {
+		if checks.ValidDeviceName.MatchString(d) {
+			eps = append(eps, pingEndpoint{dev: d})
+		}
+	}
+	return eps
+}
+
+func (j *PingMeshJob) writeHelpers(sb *strings.Builder) {
+	if j.ibvNeedsGIDDiscovery() {
+		sb.WriteString(gidDiscoveryFunc() + "\nexport -f find_rocev2_gid\n\n")
+	}
+	if len(j.Rails) > 0 {
+		sb.WriteString(resolveDevFunc() + "\nexport -f resolve_dev\n\n")
+	}
+}
+
 func (j *PingMeshJob) ibvServerScript() []string {
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\nmkdir -p /tmp\nexec 2>/tmp/pm_server_err.log\n\n")
+	j.writeHelpers(&sb)
 
-	if j.ibvNeedsGIDDiscovery() {
-		sb.WriteString(gidDiscoveryFunc())
-		sb.WriteString("\nexport -f find_rocev2_gid\n\n")
-	}
-
+	// An unresolved rail still uses its port slots so client port numbers stay aligned.
 	fmt.Fprintf(&sb, "timeout %d bash -c '\nidx=0\n", j.serverTimeout())
-	for _, sdev := range j.ServerDevices {
-		if !checks.ValidDeviceName.MatchString(sdev) {
-			continue
-		}
+	for _, s := range j.endpoints(j.ServerDevices) {
 		gidFlag := j.ibvGIDFlagExpr("$sdev")
-		fmt.Fprintf(&sb, "sdev=%s\n", sdev)
-		fmt.Fprintf(&sb, "for cslot in $(seq 0 %d); do\n", len(j.ClientDevices)-1)
-		fmt.Fprintf(&sb, "  ibv_rc_pingpong -d $sdev%s -p $((18515 + idx)) -n %d > /dev/null 2>&1 &\n",
+		fmt.Fprintf(&sb, "sdev=%s\n", s.dev)
+		fmt.Fprintf(&sb, "for cslot in $(seq 0 %d); do\n", len(j.endpoints(j.ClientDevices))-1)
+		fmt.Fprintf(&sb, "  [ -n \"$sdev\" ] && ibv_rc_pingpong -d $sdev%s -p $((18515 + idx)) -n %d > /dev/null 2>&1 &\n",
 			gidFlag, j.Iterations)
 		sb.WriteString("  idx=$((idx + 1))\ndone\n")
 	}
@@ -270,45 +323,32 @@ func (j *PingMeshJob) srdServerScript() []string {
 func (j *PingMeshJob) ibvClientScript(serverIP string) []string {
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\nmkdir -p /tmp/pm\nexec 2>/tmp/pm/script_stderr.log\n\n")
+	j.writeHelpers(&sb)
 
-	if j.ibvNeedsGIDDiscovery() {
-		sb.WriteString(gidDiscoveryFunc())
-		sb.WriteString("\n\n")
-	}
-
-	// Port indices must match between server and client scripts (both iterate
-	// ServerDevices × ClientDevices in the same order with the same ValidDeviceName filter).
+	// Same endpoint order as the server keeps ports aligned. Results are cdev:sdev:rc:crail:srail;
+	// in rail mode the server's device is unknown here, so sdev is empty and rails identify the pair.
 	sb.WriteString("idx=0\n")
-	for _, sdev := range j.ServerDevices {
-		if !checks.ValidDeviceName.MatchString(sdev) {
-			continue
-		}
-		for _, cdev := range j.ClientDevices {
-			if !checks.ValidDeviceName.MatchString(cdev) {
-				continue
+	for _, s := range j.endpoints(j.ServerDevices) {
+		for _, c := range j.endpoints(j.ClientDevices) {
+			sdev := s.dev
+			if s.rail != "" {
+				sdev = ""
 			}
+			result := fmt.Sprintf("echo \"$cdev:%s:$rc:%s:%s\" >> /tmp/pm/results.txt\n", sdev, c.rail, s.rail)
+			fmt.Fprintf(&sb, "cdev=%s\n", c.dev)
+			fmt.Fprintf(&sb, "if [ -z \"$cdev\" ]; then\n  echo 'no RDMA device for %s in this pod' > /tmp/pm/out_${idx}.txt; rc=1\n", c.rail)
 			if j.ibvNeedsGIDDiscovery() {
-				// Validate GID before running ibv_rc_pingpong; -1 means discovery failed
-				fmt.Fprintf(&sb, "_gid=$(find_rocev2_gid %s)\n", cdev)
-				sb.WriteString("if [ \"$_gid\" -eq -1 ]; then\n")
-				fmt.Fprintf(&sb, "  echo 'no RoCE v2 GID for %s' > /tmp/pm/out_${idx}.txt\n", cdev)
-				fmt.Fprintf(&sb, "  echo '%s:%s:1' >> /tmp/pm/results.txt\n", cdev, sdev)
-				sb.WriteString("else\n")
+				sb.WriteString("elif ! _gid=$(find_rocev2_gid \"$cdev\"); then\n")
+				sb.WriteString("  echo \"no RoCE v2 GID for $cdev\" > /tmp/pm/out_${idx}.txt; rc=1\n")
 				fmt.Fprintf(&sb,
-					"  timeout %d ibv_rc_pingpong -d %s -g $_gid -p $((18515 + idx)) -n %d %s > /tmp/pm/out_${idx}.txt 2>&1\n",
-					j.Timeout, cdev, j.Iterations, serverIP,
-				)
-				fmt.Fprintf(&sb, "  echo '%s:%s:'$? >> /tmp/pm/results.txt\n", cdev, sdev)
-				sb.WriteString("fi\n")
+					"else\n  timeout %d ibv_rc_pingpong -d \"$cdev\" -g $_gid -p $((18515 + idx)) -n %d %s > /tmp/pm/out_${idx}.txt 2>&1; rc=$?\n",
+					j.Timeout, j.Iterations, serverIP)
 			} else {
-				gidFlag := j.ibvGIDFlagExpr(cdev)
 				fmt.Fprintf(&sb,
-					"timeout %d ibv_rc_pingpong -d %s%s -p $((18515 + idx)) -n %d %s > /tmp/pm/out_${idx}.txt 2>&1\n",
-					j.Timeout, cdev, gidFlag, j.Iterations, serverIP,
-				)
-				fmt.Fprintf(&sb, "echo '%s:%s:'$? >> /tmp/pm/results.txt\n", cdev, sdev)
+					"else\n  timeout %d ibv_rc_pingpong -d \"$cdev\"%s -p $((18515 + idx)) -n %d %s > /tmp/pm/out_${idx}.txt 2>&1; rc=$?\n",
+					j.Timeout, j.ibvGIDFlagExpr("\"$cdev\""), j.Iterations, serverIP)
 			}
-			sb.WriteString("idx=$((idx + 1))\n")
+			sb.WriteString("fi\n" + result + "idx=$((idx + 1))\n")
 		}
 	}
 
@@ -361,14 +401,14 @@ func (j *PingMeshJob) appendClientJSON(sb *strings.Builder) {
 printf '{"server_node":"%s","client_node":"%s","results":['
 first=1
 idx=0
-while IFS=: read -r cdev sdev rc; do
+while IFS=: read -r cdev sdev rc crail srail; do
   [ $first -eq 0 ] && printf ','
   first=0
   if [ "$rc" -eq 0 ]; then
-    printf '{"src_dev":"%%s","dst_dev":"%%s","pass":true}' "$cdev" "$sdev"
+    printf '{"src_dev":"%%s","dst_dev":"%%s","src_rail":"%%s","dst_rail":"%%s","pass":true}' "$cdev" "$sdev" "$crail" "$srail"
   else
     err=$(head -c 200 /tmp/pm/out_${idx}.txt 2>/dev/null | tr '"' "'" | tr '\\' '/' | tr '\n' ' ' | tr -d '\000-\037')
-    printf '{"src_dev":"%%s","dst_dev":"%%s","pass":false,"error":"%%s"}' "$cdev" "$sdev" "$err"
+    printf '{"src_dev":"%%s","dst_dev":"%%s","src_rail":"%%s","dst_rail":"%%s","pass":false,"error":"%%s"}' "$cdev" "$sdev" "$crail" "$srail" "$err"
   fi
   idx=$((idx + 1))
 done < /tmp/pm/results.txt
